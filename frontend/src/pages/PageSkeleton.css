@@ -1,0 +1,17 @@
+.page-skeleton {
+  padding: 96px 0 120px;
+  min-height: 50vh;
+}
+
+.page-skeleton h1 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: clamp(36px, 5vw, 56px);
+  margin: 14px 0 20px;
+}
+
+.page-skeleton__lede {
+  color: var(--ink-muted);
+  font-size: 18px;
+  max-width: 56ch;
+}

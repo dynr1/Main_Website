@@ -1,0 +1,12 @@
+.site-footer {
+  border-top: 1px solid var(--hairline);
+  padding: 28px 0;
+}
+
+.site-footer__row {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-muted);
+}
