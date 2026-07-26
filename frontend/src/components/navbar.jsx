@@ -3,9 +3,6 @@ import { Link, useLocation } from "react-router-dom";
 
 export default function Navbar() {
   const [open, setOpen] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(
-  () => !!sessionStorage.getItem("dynr_admin_token")
-);
   const location = useLocation();
 
   useEffect(() => {
@@ -13,15 +10,6 @@ export default function Navbar() {
     document.addEventListener("click", closeMenu);
     return () => document.removeEventListener("click", closeMenu);
   }, []);
-
-  useEffect(() => {
-  function checkAdmin() {
-    setIsAdmin(!!sessionStorage.getItem("dynr_admin_token"));
-  }
-  checkAdmin();
-  window.addEventListener("dynr-admin-unlock", checkAdmin);
-  return () => window.removeEventListener("dynr-admin-unlock", checkAdmin);
-}, [location.pathname]);
 
   const isActive = (path) => (location.pathname === path ? "is-active" : "");
 
@@ -64,11 +52,13 @@ export default function Navbar() {
           For Restaurants
         </Link>
 
-        {isAdmin && (
-          <Link className={isActive("/membership")} to="/membership">
-            Membership
-          </Link>
-        )}
+        <Link className={isActive("/login")} to="/login">
+          Sign In
+        </Link>
+
+        <Link className={isActive("/membership")} to="/membership">
+          Membership
+        </Link>
 
         <Link className={isActive("/contact")} to="/contact">
           Contact

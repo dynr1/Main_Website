@@ -3,7 +3,7 @@ import { useState, useEffect } from "react";
 export default function AdminGate({ children }) {
   const [unlocked, setUnlocked] = useState(false);
   const [checking, setChecking] = useState(true);
-  const [passcode, setPasscode] = useState("");
+  const [form, setForm] = useState({ email: "", password: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -13,25 +13,29 @@ export default function AdminGate({ children }) {
     setChecking(false);
   }, []);
 
+  function handleChange(e) {
+    const { name, value } = e.target;
+    setForm((f) => ({ ...f, [name]: value }));
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
     setLoading(true);
 
     try {
-      const res = await fetch("/api/admin/verify", {
+      const res = await fetch("/api/admin/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ passcode }),
+        body: JSON.stringify(form),
       });
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data?.error || "Incorrect passcode.");
+        throw new Error(data?.error || "Invalid email or password.");
       }
 
       sessionStorage.setItem("dynr_admin_token", data.adminToken);
-      window.dispatchEvent(new Event("dynr-admin-unlock"));
       setUnlocked(true);
     } catch (err) {
       setError(err.message);
@@ -46,27 +50,41 @@ export default function AdminGate({ children }) {
     return (
       <section>
         <div className="container content-block">
-          <span className="eyebrow">Admin only</span>
+          <span className="eyebrow">Admin Login</span>
           <h1 style={{ marginTop: "14px", marginBottom: "24px" }}>
-            Enter passcode
+            Sign in to manage members
           </h1>
 
           {error && <div className="form-error">{error}</div>}
 
           <form onSubmit={handleSubmit}>
             <div className="form-group">
-              <label htmlFor="passcode">Passcode</label>
+              <label htmlFor="admin-email">Email</label>
               <input
-                id="passcode"
-                type="password"
-                value={passcode}
-                onChange={(e) => setPasscode(e.target.value)}
+                id="admin-email"
+                name="email"
+                type="email"
+                value={form.email}
+                onChange={handleChange}
                 required
                 autoFocus
               />
             </div>
+
+            <div className="form-group">
+              <label htmlFor="admin-password">Password</label>
+              <input
+                id="admin-password"
+                name="password"
+                type="password"
+                value={form.password}
+                onChange={handleChange}
+                required
+              />
+            </div>
+
             <button type="submit" className="btn" disabled={loading}>
-              {loading ? "Checking…" : "Unlock"}
+              {loading ? "Signing in…" : "Sign In"}
             </button>
           </form>
         </div>

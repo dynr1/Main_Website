@@ -8,10 +8,9 @@ import WhatWeDo from "./pages/WhatWeDo";
 import OurStory from "./pages/OurStory";
 import ForRestaurants from "./pages/ForRestaurants";
 import Contact from "./pages/Contact";
+import Login from "./pages/Login";
 import AdminGate from "./components/AdminGate";
 import Membership from "./pages/Membership";
-import MembershipPayment from "./pages/MembershipPayment";
-import MembershipSuccess from "./pages/MembershipSuccess";
 import Dashboard from "./pages/Dashboard";
 
 function App() {
@@ -25,9 +24,15 @@ function App() {
         <Route path="/our-story" element={<OurStory />} />
         <Route path="/for-restaurants" element={<ForRestaurants />} />
         <Route path="/contact" element={<Contact />} />
-        <Route path="/membership" element={<AdminGate><Membership /></AdminGate>} />
-        <Route path="/membership/payment" element={<MembershipPayment />} />
-        <Route path="/membership/success" element={<MembershipSuccess />} />
+        <Route path="/login" element={<Login />} />
+        <Route
+          path="/membership"
+          element={
+            <AdminGate>
+              <Membership />
+            </AdminGate>
+          }
+        />
         <Route path="/dashboard" element={<Dashboard />} />
       </Routes>
 

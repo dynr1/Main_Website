@@ -81,8 +81,47 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' })
 })
 
-// ---------- Membership: Register ----------
-app.post('/api/register', async (req, res) => {
+// ---------- Admin auth middleware ----------
+function requireAdmin(req, res, next) {
+  const authHeader = req.headers.authorization || ''
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+
+  if (!token) {
+    return res.status(401).json({ error: 'Not authenticated.' })
+  }
+
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET)
+    if (payload.role !== 'admin') {
+      return res.status(403).json({ error: 'Not authorized.' })
+    }
+    next()
+  } catch (err) {
+    return res.status(401).json({ error: 'Session expired. Please sign in again.' })
+  }
+}
+
+// ---------- Admin: Login ----------
+app.post('/api/admin/login', (req, res) => {
+  const { email, password } = req.body || {}
+
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required.' })
+  }
+
+  if (email !== process.env.ADMIN_EMAIL || password !== process.env.ADMIN_PASSWORD) {
+    return res.status(401).json({ error: 'Invalid email or password.' })
+  }
+
+  const adminToken = jwt.sign({ role: 'admin' }, process.env.JWT_SECRET, {
+    expiresIn: '12h',
+  })
+
+  return res.json({ adminToken })
+})
+
+// ---------- Membership: Register a restaurant (admin only) ----------
+app.post('/api/register', requireAdmin, async (req, res) => {
   const { restaurantName, email, phone, password } = req.body || {}
 
   if (!restaurantName || !email || !password) {
@@ -107,22 +146,43 @@ app.post('/api/register', async (req, res) => {
 
     const result = db
       .prepare(
-        'INSERT INTO members (restaurant_name, email, phone, password_hash, is_paid) VALUES (?, ?, ?, ?, 0)'
+        'INSERT INTO members (restaurant_name, email, phone, password_hash, is_paid) VALUES (?, ?, ?, ?, 1)'
       )
       .run(restaurantName, email, phone || null, passwordHash)
 
-    const token = jwt.sign({ memberId: result.lastInsertRowid }, process.env.JWT_SECRET, {
-      expiresIn: '7d',
-    })
+    // Email the restaurant their dashboard login details
+    try {
+      await transporter.sendMail({
+        from: process.env.MAIL_FROM || '"dynR" <no-reply@dynr.co.uk>',
+        to: email,
+        subject: 'Your dynR dashboard is ready',
+        text: `Hi ${restaurantName},
 
-    return res.status(201).json({ token, isPaid: false })
+Your dynR account has been created. Here are your dashboard login details:
+
+Login page: ${process.env.APP_URL || 'https://dynr.co.uk'}/login
+Email: ${email}
+Password: ${password}
+
+We'd recommend changing your password after your first login.
+
+Welcome aboard,
+The dynR team`,
+      })
+    } catch (mailErr) {
+      // Don't fail the whole registration if the email fails to send —
+      // the account is already created, just log it so you notice.
+      console.error('Failed to send welcome email to restaurant:', mailErr)
+    }
+
+    return res.status(201).json({ ok: true, restaurantId: result.lastInsertRowid })
   } catch (err) {
     console.error('Registration failed:', err)
     return res.status(500).json({ error: 'Registration failed. Please try again.' })
   }
 })
 
-// ---------- Membership: Sign In ----------
+// ---------- Membership: Restaurant Sign In ----------
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body || {}
 
@@ -142,10 +202,10 @@ app.post('/api/login', async (req, res) => {
 
   const token = jwt.sign({ memberId: member.id }, process.env.JWT_SECRET, { expiresIn: '7d' })
 
-  return res.json({ token, isPaid: !!member.is_paid })
+  return res.json({ token })
 })
 
-// ---------- Auth middleware ----------
+// ---------- Restaurant auth middleware ----------
 function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization || ''
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
@@ -163,29 +223,10 @@ function requireAuth(req, res, next) {
   }
 }
 
-// ---------- Membership: Complete payment (placeholder) ----------
-app.post('/api/payment/complete', requireAuth, (req, res) => {
-  db.prepare('UPDATE members SET is_paid = 1 WHERE id = ?').run(req.memberId)
-  return res.json({ ok: true })
-})
-// ---------- Admin gate for membership registration ----------
-app.post('/api/admin/verify', (req, res) => {
-  const { passcode } = req.body || {}
-
-  if (!passcode || passcode !== process.env.ADMIN_PASSCODE) {
-    return res.status(401).json({ error: 'Incorrect passcode.' })
-  }
-
-  const adminToken = jwt.sign({ role: 'admin' }, process.env.JWT_SECRET, {
-    expiresIn: '12h',
-  })
-
-  return res.json({ adminToken })
-})
-// ---------- Membership: Current member info (for dashboard later) ----------
+// ---------- Membership: Current member info (for dashboard) ----------
 app.get('/api/member/me', requireAuth, (req, res) => {
   const member = db
-    .prepare('SELECT id, restaurant_name, email, phone, is_paid, created_at FROM members WHERE id = ?')
+    .prepare('SELECT id, restaurant_name, email, phone, created_at FROM members WHERE id = ?')
     .get(req.memberId)
 
   if (!member) {
