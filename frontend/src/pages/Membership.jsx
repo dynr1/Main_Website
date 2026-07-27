@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { API_URL } from "../api";
 
 const initialForm = {
   restaurantName: "",
@@ -27,7 +28,7 @@ export default function Membership() {
     try {
       const adminToken = sessionStorage.getItem("dynr_admin_token");
 
-      const res = await fetch("/api/register", {
+      const res = await fetch(`${API_URL}/api/register`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
