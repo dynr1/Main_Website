@@ -12,32 +12,92 @@ import Login from "./pages/Login";
 import AdminGate from "./components/AdminGate";
 import Membership from "./pages/Membership";
 import Dashboard from "./pages/Dashboard";
+import GuestJoin from "./pages/GuestJoin";
 
-function App() {
+function SiteLayout({ children }) {
   return (
     <>
       <Navbar />
+      {children}
+      <Footer />
+    </>
+  );
+}
 
-      <Routes>
-        <Route path="/" element={<Home />} />
-        <Route path="/what-we-do" element={<WhatWeDo />} />
-        <Route path="/our-story" element={<OurStory />} />
-        <Route path="/for-restaurants" element={<ForRestaurants />} />
-        <Route path="/contact" element={<Contact />} />
-        <Route path="/login" element={<Login />} />
-        <Route
-          path="/membership"
-          element={
+function App() {
+  return (
+    <Routes>
+      {/* Standalone — no dynR navbar/footer, branded as the restaurant only */}
+      <Route path="/join/:slug" element={<GuestJoin />} />
+
+      {/* Everything else keeps the normal site layout */}
+      <Route
+        path="/"
+        element={
+          <SiteLayout>
+            <Home />
+          </SiteLayout>
+        }
+      />
+      <Route
+        path="/what-we-do"
+        element={
+          <SiteLayout>
+            <WhatWeDo />
+          </SiteLayout>
+        }
+      />
+      <Route
+        path="/our-story"
+        element={
+          <SiteLayout>
+            <OurStory />
+          </SiteLayout>
+        }
+      />
+      <Route
+        path="/for-restaurants"
+        element={
+          <SiteLayout>
+            <ForRestaurants />
+          </SiteLayout>
+        }
+      />
+      <Route
+        path="/contact"
+        element={
+          <SiteLayout>
+            <Contact />
+          </SiteLayout>
+        }
+      />
+      <Route
+        path="/login"
+        element={
+          <SiteLayout>
+            <Login />
+          </SiteLayout>
+        }
+      />
+      <Route
+        path="/membership"
+        element={
+          <SiteLayout>
             <AdminGate>
               <Membership />
             </AdminGate>
-          }
-        />
-        <Route path="/dashboard" element={<Dashboard />} />
-      </Routes>
-
-      <Footer />
-    </>
+          </SiteLayout>
+        }
+      />
+      <Route
+        path="/dashboard"
+        element={
+          <SiteLayout>
+            <Dashboard />
+          </SiteLayout>
+        }
+      />
+    </Routes>
   );
 }
 
