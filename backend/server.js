@@ -459,7 +459,45 @@ app.post('/api/guests/message', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'Failed to send message. Please check your email settings.' })
   }
 })
+// ---------- Settings: Get current restaurant settings ----------
+app.get('/api/settings', requireAuth, (req, res) => {
+  const member = db
+    .prepare(
+      'SELECT smtp_host, smtp_port, smtp_user, smtp_pass, google_review_url FROM members WHERE id = ?'
+    )
+    .get(req.memberId)
 
+  if (!member) {
+    return res.status(404).json({ error: 'Restaurant not found.' })
+  }
+
+  return res.json({ settings: member })
+})
+
+// ---------- Settings: Update SMTP + Google review link ----------
+app.put('/api/settings', requireAuth, (req, res) => {
+  const { smtpHost, smtpPort, smtpUser, smtpPass, googleReviewUrl } = req.body || {}
+
+  try {
+    db.prepare(
+      `UPDATE members
+       SET smtp_host = ?, smtp_port = ?, smtp_user = ?, smtp_pass = ?, google_review_url = ?
+       WHERE id = ?`
+    ).run(
+      smtpHost || null,
+      smtpPort || null,
+      smtpUser || null,
+      smtpPass || null,
+      googleReviewUrl || null,
+      req.memberId
+    )
+
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('Failed to update settings:', err)
+    return res.status(500).json({ error: 'Failed to save settings. Please try again.' })
+  }
+})
 app.listen(PORT, () => {
   console.log(`dynR backend listening on http://localhost:${PORT}`)
 })

@@ -9,7 +9,7 @@ export default function Dashboard() {
   const [selected, setSelected] = useState([]);
   const [activeGuest, setActiveGuest] = useState(null);
   const [showQR, setShowQR] = useState(false);
-  const [messageTarget, setMessageTarget] = useState(null); // "single" | "bulk" | null
+  const [messageTarget, setMessageTarget] = useState(null);
   const [messageText, setMessageText] = useState("");
   const [messageStatus, setMessageStatus] = useState("idle");
   const [noteText, setNoteText] = useState("");
@@ -102,8 +102,7 @@ export default function Dashboard() {
     if (!messageText.trim()) return;
     setMessageStatus("sending");
 
-    const guestIds =
-      messageTarget === "single" ? [activeGuest.id] : selected;
+    const guestIds = messageTarget === "single" ? [activeGuest.id] : selected;
 
     try {
       const res = await fetch(`${API_URL}/api/guests/message`, {
@@ -149,7 +148,16 @@ export default function Dashboard() {
           <div className="dash-topbar-logo">
             dyn<span>R</span>
           </div>
+
           <div className="dash-topbar-right">
+            
+              href="/settings"
+              className="dash-sidebar-btn"
+              style={{ width: "auto", padding: "10px 18px", marginBottom: 0 }}
+            <a>
+              Settings
+            </a>
+
             {restaurantSlug && (
               <button
                 type="button"
@@ -160,6 +168,7 @@ export default function Dashboard() {
                 Generate QR
               </button>
             )}
+
             <span>{restaurant?.restaurant_name || "..."}</span>
             <div className="dash-avatar">{initials}</div>
           </div>
@@ -310,7 +319,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* QR Modal */}
       {showQR && (
         <div className="dash-modal-overlay" onClick={() => setShowQR(false)}>
           <div className="dash-modal" onClick={(e) => e.stopPropagation()}>
@@ -332,14 +340,15 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Add Note Modal */}
       {showNoteBox && activeGuest && (
         <div
           className="dash-modal-overlay"
           onClick={() => setShowNoteBox(false)}
         >
           <div className="dash-modal" onClick={(e) => e.stopPropagation()}>
-            <h4 style={{ marginBottom: 12 }}>Add a note — {activeGuest.name}</h4>
+            <h4 style={{ marginBottom: 12 }}>
+              Add a note — {activeGuest.name}
+            </h4>
             <textarea
               className="dash-modal-textarea"
               placeholder="e.g. Usually sits at Table 4. Nut allergy. Ordered the sea bass last visit."
@@ -367,7 +376,6 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Send Message Modal */}
       {messageTarget && (
         <div
           className="dash-modal-overlay"

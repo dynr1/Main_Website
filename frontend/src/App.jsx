@@ -13,6 +13,7 @@ import AdminGate from "./components/AdminGate";
 import Membership from "./pages/Membership";
 import Dashboard from "./pages/Dashboard";
 import GuestJoin from "./pages/GuestJoin";
+import Settings from "./pages/Settings";
 
 function SiteLayout({ children }) {
   return (
@@ -97,6 +98,14 @@ function App() {
           </SiteLayout>
         }
       />
+      <Route
+  path="/settings"
+  element={
+    <SiteLayout>
+      <Settings />
+    </SiteLayout>
+  }
+/>
     </Routes>
   );
 }
