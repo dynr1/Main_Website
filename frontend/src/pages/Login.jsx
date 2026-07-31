@@ -80,6 +80,9 @@ export default function Login() {
             {loading ? "Signing in…" : "Sign In"}
           </button>
         </form>
+        <p style={{ marginTop: "16px" }}>
+  <a href="/forgot-password">Forgot password?</a>
+</p>
       </div>
     </section>
   );

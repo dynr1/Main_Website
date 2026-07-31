@@ -5,9 +5,20 @@ import rateLimit from 'express-rate-limit'
 import nodemailer from 'nodemailer'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
+import crypto from 'crypto'
 import db from './db.js'
 
 dotenv.config()
+
+// Safety net: log and keep running instead of the whole server dying on an
+// unexpected error somewhere. This is what let /api/register and
+// /api/guests/message go down when an unrelated part of the app crashed.
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled promise rejection (server kept running):', err)
+})
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception (server kept running):', err)
+})
 
 const app = express()
 const PORT = process.env.PORT || 4000
@@ -219,6 +230,41 @@ The dynR team`,
   }
 })
 
+// ---------- Admin: List all registered restaurants ----------
+// This reads directly from `members` every time, so it always reflects the
+// live state — including payment_status, which only this endpoint (and the
+// one below it) can change. A restaurant editing their own email/password
+// via /api/login-protected routes never touches payment_status.
+app.get('/api/admin/restaurants', requireAdmin, (req, res) => {
+  const restaurants = db
+    .prepare(
+      `SELECT id, restaurant_name, email, phone, payment_status, created_at
+       FROM members
+       ORDER BY created_at DESC`
+    )
+    .all()
+
+  return res.json({ restaurants })
+})
+
+// ---------- Admin: Set a restaurant's payment status ----------
+app.put('/api/admin/restaurants/:id/payment', requireAdmin, (req, res) => {
+  const { paymentStatus } = req.body || {}
+
+  if (!['paid', 'unpaid'].includes(paymentStatus)) {
+    return res.status(400).json({ error: "paymentStatus must be 'paid' or 'unpaid'." })
+  }
+
+  const existing = db.prepare('SELECT id FROM members WHERE id = ?').get(req.params.id)
+  if (!existing) {
+    return res.status(404).json({ error: 'Restaurant not found.' })
+  }
+
+  db.prepare('UPDATE members SET payment_status = ? WHERE id = ?').run(paymentStatus, req.params.id)
+
+  return res.json({ ok: true })
+})
+
 // ---------- Membership: Restaurant Sign In ----------
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body || {}
@@ -240,6 +286,84 @@ app.post('/api/login', async (req, res) => {
   const token = jwt.sign({ memberId: member.id }, process.env.JWT_SECRET, { expiresIn: '7d' })
 
   return res.json({ token })
+})
+
+// ---------- Membership: Forgot password ----------
+// Always responds the same way whether or not the email exists, so this
+// endpoint can't be used to check which emails are registered.
+app.post('/api/forgot-password', async (req, res) => {
+  const { email } = req.body || {}
+
+  if (!email || !isValidEmail(email)) {
+    return res.status(400).json({ error: 'Please enter a valid email address.' })
+  }
+
+  const genericResponse = {
+    ok: true,
+    message: 'If an account exists for that email, a reset link has been sent.',
+  }
+
+  const member = db.prepare('SELECT * FROM members WHERE email = ?').get(email)
+  if (!member) {
+    return res.json(genericResponse)
+  }
+
+  const token = crypto.randomBytes(32).toString('hex')
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString() // 1 hour
+
+  db.prepare(
+    'INSERT INTO password_resets (member_id, token, expires_at) VALUES (?, ?, ?)'
+  ).run(member.id, token, expiresAt)
+
+  const resetUrl = `${process.env.APP_URL || 'https://dynr.co.uk'}/reset-password?token=${token}`
+
+  try {
+    await transporter.sendMail({
+      from: process.env.MAIL_FROM || '"dynR" <no-reply@dynr.co.uk>',
+      to: email,
+      subject: 'Reset your dynR password',
+      text: `Hi ${member.restaurant_name},
+
+We received a request to reset your dynR dashboard password. Click the link below to choose a new one — it's valid for 1 hour:
+
+${resetUrl}
+
+If you didn't request this, you can safely ignore this email.
+
+The dynR team`,
+    })
+  } catch (mailErr) {
+    console.error('Failed to send password reset email:', mailErr)
+    // Still return the generic success response — don't reveal send failures to the caller.
+  }
+
+  return res.json(genericResponse)
+})
+
+// ---------- Membership: Reset password with token ----------
+app.post('/api/reset-password', async (req, res) => {
+  const { token, newPassword } = req.body || {}
+
+  if (!token || !newPassword) {
+    return res.status(400).json({ error: 'Token and new password are required.' })
+  }
+
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters.' })
+  }
+
+  const resetRow = db.prepare('SELECT * FROM password_resets WHERE token = ?').get(token)
+
+  if (!resetRow || resetRow.used || new Date(resetRow.expires_at) < new Date()) {
+    return res.status(400).json({ error: 'This reset link is invalid or has expired. Please request a new one.' })
+  }
+
+  const passwordHash = await bcrypt.hash(newPassword, 10)
+
+  db.prepare('UPDATE members SET password_hash = ? WHERE id = ?').run(passwordHash, resetRow.member_id)
+  db.prepare('UPDATE password_resets SET used = 1 WHERE id = ?').run(resetRow.id)
+
+  return res.json({ ok: true })
 })
 
 // ---------- Membership: Current member info (for dashboard) ----------
@@ -377,6 +501,15 @@ app.post('/api/guests/:id/visit', requireAuth, (req, res) => {
 
   db.prepare('INSERT INTO visits (guest_id) VALUES (?)').run(guest.id)
 
+  // Queue a "thanks for visiting" follow-up email for 1 hour from now.
+  // A background poller (see below) picks this up and sends it — using a
+  // DB row instead of setTimeout means it still gets sent even if the
+  // server restarts or redeploys in the meantime.
+  const sendAt = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+  db.prepare(
+    'INSERT INTO scheduled_emails (guest_id, restaurant_id, send_at, status) VALUES (?, ?, ?, ?)'
+  ).run(guest.id, req.memberId, sendAt, 'pending')
+
   return res.json({ ok: true })
 })
 
@@ -498,6 +631,68 @@ app.put('/api/settings', requireAuth, (req, res) => {
     return res.status(500).json({ error: 'Failed to save settings. Please try again.' })
   }
 })
+// ---------- Background poller: send due "thanks for visiting" emails ----------
+async function sendDueScheduledEmails() {
+  let due
+  try {
+    const nowIso = new Date().toISOString()
+    due = db
+      .prepare(
+        `SELECT se.id as scheduled_id, g.id as guest_id, g.name, g.email,
+                m.restaurant_name, m.smtp_host, m.smtp_port, m.smtp_user, m.smtp_pass, m.google_review_url
+         FROM scheduled_emails se
+         JOIN guests g ON g.id = se.guest_id
+         JOIN members m ON m.id = se.restaurant_id
+         WHERE se.status = 'pending' AND se.send_at <= ?`
+      )
+      .all(nowIso)
+  } catch (err) {
+    console.error('Failed to query scheduled_emails — skipping this poll cycle:', err)
+    return
+  }
+
+  for (const row of due) {
+    // No email on file, or restaurant hasn't set up their SMTP yet — skip, don't retry forever.
+    if (!row.email || !row.smtp_host || !row.smtp_user || !row.smtp_pass) {
+      try {
+        db.prepare('UPDATE scheduled_emails SET status = ? WHERE id = ?').run('skipped', row.scheduled_id)
+      } catch (err) {
+        console.error(`Failed to mark scheduled_emails id ${row.scheduled_id} as skipped:`, err)
+      }
+      continue
+    }
+
+    try {
+      const restaurantTransporter = nodemailer.createTransport({
+        host: row.smtp_host,
+        port: Number(row.smtp_port) || 587,
+        secure: false,
+        auth: { user: row.smtp_user, pass: row.smtp_pass },
+      })
+
+      const reviewLine = row.google_review_url
+        ? `\n\nIf you enjoyed your visit, we'd love a quick review here: ${row.google_review_url}`
+        : ''
+
+      await restaurantTransporter.sendMail({
+        from: row.smtp_user,
+        to: row.email,
+        subject: `Thanks for visiting ${row.restaurant_name}!`,
+        text: `Hi ${row.name.split(' ')[0]},\n\nThanks so much for visiting ${row.restaurant_name} today — we hope you had a great time.${reviewLine}\n\nSee you again soon,\nThe ${row.restaurant_name} team`,
+      })
+
+      db.prepare('UPDATE scheduled_emails SET status = ? WHERE id = ?').run('sent', row.scheduled_id)
+    } catch (err) {
+      console.error(`Failed to send visit follow-up email (scheduled_emails id ${row.scheduled_id}):`, err)
+      db.prepare('UPDATE scheduled_emails SET status = ? WHERE id = ?').run('failed', row.scheduled_id)
+    }
+  }
+}
+
+// Check every minute. Good enough for a "within the hour" follow-up without hammering SMTP.
+setInterval(sendDueScheduledEmails, 60 * 1000)
+
 app.listen(PORT, () => {
   console.log(`dynR backend listening on http://localhost:${PORT}`)
+  sendDueScheduledEmails() // catch anything that was due while the server was down
 })

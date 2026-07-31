@@ -276,6 +276,10 @@ export default function Dashboard() {
                   Member #{activeGuest.membership_number} · Joined{" "}
                   {activeGuest.created_at?.slice(0, 10)}
                 </p>
+                <p className="dash-sidebar-meta">
+                  {activeGuest.email || "No email on file"}
+                  {activeGuest.phone ? ` · ${activeGuest.phone}` : ""}
+                </p>
 
                 <h4>Notes</h4>
                 <div className="dash-notes-box">

@@ -40,6 +40,7 @@ addColumnIfMissing('members', 'smtp_user', 'TEXT')
 addColumnIfMissing('members', 'smtp_pass', 'TEXT')
 addColumnIfMissing('members', 'google_review_url', 'TEXT')
 addColumnIfMissing('members', 'slug', 'TEXT')
+addColumnIfMissing('members', 'payment_status', "TEXT NOT NULL DEFAULT 'unpaid'")
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS guests (
@@ -85,6 +86,18 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (guest_id) REFERENCES guests(id),
     FOREIGN KEY (restaurant_id) REFERENCES members(id)
+  )
+`)
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS password_resets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    member_id INTEGER NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (member_id) REFERENCES members(id)
   )
 `)
 

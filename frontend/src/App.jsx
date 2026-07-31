@@ -14,6 +14,8 @@ import Membership from "./pages/Membership";
 import Dashboard from "./pages/Dashboard";
 import GuestJoin from "./pages/GuestJoin";
 import Settings from "./pages/Settings";
+import ForgotPassword from "./pages/ForgotPassword";
+import ResetPassword from "./pages/ResetPassword";
 
 function SiteLayout({ children }) {
   return (
@@ -80,6 +82,22 @@ function App() {
           </SiteLayout>
         }
       />
+      <Route
+  path="/forgot-password"
+  element={
+    <SiteLayout>
+      <ForgotPassword />
+    </SiteLayout>
+  }
+/>
+<Route
+  path="/reset-password"
+  element={
+    <SiteLayout>
+      <ResetPassword />
+    </SiteLayout>
+  }
+/>
       <Route
         path="/membership"
         element={
