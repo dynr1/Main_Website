@@ -150,11 +150,7 @@ export default function Dashboard() {
           </div>
 
           <div className="dash-topbar-right">
-            
-              href="/settings"
-              className="dash-sidebar-btn"
-              style={{ width: "auto", padding: "10px 18px", marginBottom: 0 }}
-            <a>
+            <a href="/settings" className="dash-sidebar-btn" style={{ width: "auto", padding: "10px 18px", marginBottom: 0 }}>
               Settings
             </a>
 
