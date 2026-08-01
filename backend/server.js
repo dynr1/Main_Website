@@ -35,6 +35,34 @@ const contactLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again later.' },
 })
 
+// Login endpoints: looser than contact (real users mistype passwords),
+// but still enough to make brute-forcing impractical.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts. Please try again in a few minutes.' },
+})
+
+// Admin login: fewer legitimate retries expected, so a tighter cap.
+const adminLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts. Please try again in a few minutes.' },
+})
+
+// Forgot-password: prevent using it to spam a restaurant's inbox.
+const forgotPasswordLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many reset requests. Please try again later.' },
+})
+
 // Mail transport — configure via .env (see .env.example)
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -149,7 +177,7 @@ function requireAuth(req, res, next) {
 }
 
 // ---------- Admin: Login ----------
-app.post('/api/admin/login', (req, res) => {
+app.post('/api/admin/login', adminLoginLimiter, (req, res) => {
   const { email, password } = req.body || {}
 
   if (!email || !password) {
@@ -169,7 +197,17 @@ app.post('/api/admin/login', (req, res) => {
 
 // ---------- Membership: Register a restaurant (admin only) ----------
 app.post('/api/register', requireAdmin, async (req, res) => {
-  const { restaurantName, email, phone, password } = req.body || {}
+  const {
+    restaurantName,
+    email,
+    phone,
+    password,
+    smtpHost,
+    smtpPort,
+    smtpUser,
+    smtpPass,
+    googleReviewUrl,
+  } = req.body || {}
 
   if (!restaurantName || !email || !password) {
     return res.status(400).json({ error: 'Restaurant name, email, and password are required.' })
@@ -194,9 +232,23 @@ app.post('/api/register', requireAdmin, async (req, res) => {
 
     const result = db
       .prepare(
-        'INSERT INTO members (restaurant_name, email, phone, password_hash, is_paid, slug) VALUES (?, ?, ?, ?, 1, ?)'
+        `INSERT INTO members
+          (restaurant_name, email, phone, password_hash, is_paid, slug,
+           smtp_host, smtp_port, smtp_user, smtp_pass, google_review_url)
+         VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`
       )
-      .run(restaurantName, email, phone || null, passwordHash, slug)
+      .run(
+        restaurantName,
+        email,
+        phone || null,
+        passwordHash,
+        slug,
+        smtpHost || null,
+        smtpPort || null,
+        smtpUser || null,
+        smtpPass || null,
+        googleReviewUrl || null
+      )
 
     // Email the restaurant their dashboard login details
     try {
@@ -236,13 +288,24 @@ The dynR team`,
 // one below it) can change. A restaurant editing their own email/password
 // via /api/login-protected routes never touches payment_status.
 app.get('/api/admin/restaurants', requireAdmin, (req, res) => {
-  const restaurants = db
+  const rows = db
     .prepare(
-      `SELECT id, restaurant_name, email, phone, payment_status, created_at
+      `SELECT id, restaurant_name, email, phone, payment_status, created_at,
+              smtp_host, smtp_user, smtp_pass
        FROM members
        ORDER BY created_at DESC`
     )
     .all()
+
+  const restaurants = rows.map((r) => ({
+    id: r.id,
+    restaurant_name: r.restaurant_name,
+    email: r.email,
+    phone: r.phone,
+    payment_status: r.payment_status,
+    created_at: r.created_at,
+    smtp_configured: !!(r.smtp_host && r.smtp_user && r.smtp_pass),
+  }))
 
   return res.json({ restaurants })
 })
@@ -266,7 +329,7 @@ app.put('/api/admin/restaurants/:id/payment', requireAdmin, (req, res) => {
 })
 
 // ---------- Membership: Restaurant Sign In ----------
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body || {}
 
   if (!email || !password) {
@@ -291,7 +354,7 @@ app.post('/api/login', async (req, res) => {
 // ---------- Membership: Forgot password ----------
 // Always responds the same way whether or not the email exists, so this
 // endpoint can't be used to check which emails are registered.
-app.post('/api/forgot-password', async (req, res) => {
+app.post('/api/forgot-password', forgotPasswordLimiter, async (req, res) => {
   const { email } = req.body || {}
 
   if (!email || !isValidEmail(email)) {
@@ -604,7 +667,12 @@ app.get('/api/settings', requireAuth, (req, res) => {
     return res.status(404).json({ error: 'Restaurant not found.' })
   }
 
-  return res.json({ settings: member })
+  // Never send the actual password back to the browser — it'd sit in
+  // plaintext in the API response / Network tab. The frontend only needs
+  // to know whether one is already saved.
+  const { smtp_pass, ...safeMember } = member
+
+  return res.json({ settings: { ...safeMember, smtp_configured: !!smtp_pass } })
 })
 
 // ---------- Settings: Update SMTP + Google review link ----------
@@ -612,18 +680,22 @@ app.put('/api/settings', requireAuth, (req, res) => {
   const { smtpHost, smtpPort, smtpUser, smtpPass, googleReviewUrl } = req.body || {}
 
   try {
-    db.prepare(
-      `UPDATE members
-       SET smtp_host = ?, smtp_port = ?, smtp_user = ?, smtp_pass = ?, google_review_url = ?
-       WHERE id = ?`
-    ).run(
-      smtpHost || null,
-      smtpPort || null,
-      smtpUser || null,
-      smtpPass || null,
-      googleReviewUrl || null,
-      req.memberId
-    )
+    // If smtpPass is left blank, keep whatever password is already saved
+    // instead of wiping it out — the frontend never receives the real
+    // value, so an empty field here doesn't mean "clear the password."
+    if (smtpPass && smtpPass.trim()) {
+      db.prepare(
+        `UPDATE members
+         SET smtp_host = ?, smtp_port = ?, smtp_user = ?, smtp_pass = ?, google_review_url = ?
+         WHERE id = ?`
+      ).run(smtpHost || null, smtpPort || null, smtpUser || null, smtpPass, googleReviewUrl || null, req.memberId)
+    } else {
+      db.prepare(
+        `UPDATE members
+         SET smtp_host = ?, smtp_port = ?, smtp_user = ?, google_review_url = ?
+         WHERE id = ?`
+      ).run(smtpHost || null, smtpPort || null, smtpUser || null, googleReviewUrl || null, req.memberId)
+    }
 
     return res.json({ ok: true })
   } catch (err) {

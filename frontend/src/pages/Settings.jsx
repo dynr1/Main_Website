@@ -9,6 +9,7 @@ export default function Settings() {
     smtpPass: "",
     googleReviewUrl: "",
   });
+  const [smtpConfigured, setSmtpConfigured] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -29,9 +30,10 @@ export default function Settings() {
             smtpHost: data.settings.smtp_host || "",
             smtpPort: data.settings.smtp_port || "",
             smtpUser: data.settings.smtp_user || "",
-            smtpPass: data.settings.smtp_pass || "",
+            smtpPass: "",
             googleReviewUrl: data.settings.google_review_url || "",
           });
+          setSmtpConfigured(!!data.settings.smtp_configured);
         }
       } catch (err) {
         console.error("Failed to load settings:", err);
@@ -69,6 +71,10 @@ export default function Settings() {
         throw new Error(data?.error || "Failed to save settings.");
       }
 
+      if (form.smtpPass.trim()) {
+        setSmtpConfigured(true);
+        setForm((f) => ({ ...f, smtpPass: "" }));
+      }
       setSuccess(true);
     } catch (err) {
       setError(err.message);
@@ -152,7 +158,7 @@ export default function Settings() {
                 id="smtpPass"
                 name="smtpPass"
                 type="password"
-                placeholder="••••••••••••••••"
+                placeholder={smtpConfigured ? "•••••••• (saved — leave blank to keep)" : "16-character app password"}
                 value={form.smtpPass}
                 onChange={handleChange}
               />

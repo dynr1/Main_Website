@@ -6,6 +6,11 @@ const initialForm = {
   email: "",
   phone: "",
   password: "",
+  smtpHost: "",
+  smtpPort: "",
+  smtpUser: "",
+  smtpPass: "",
+  googleReviewUrl: "",
 };
 
 export default function Membership() {
@@ -124,6 +129,7 @@ export default function Membership() {
                 <th>Email</th>
                 <th>Phone</th>
                 <th>Registered</th>
+                <th>Sending</th>
                 <th>Payment</th>
               </tr>
             </thead>
@@ -134,6 +140,17 @@ export default function Membership() {
                   <td>{r.email}</td>
                   <td>{r.phone || "—"}</td>
                   <td>{r.created_at?.slice(0, 10)}</td>
+                  <td>
+                    <span
+                      className="dash-tag"
+                      style={{
+                        background: r.smtp_configured ? "#eaf7ec" : "#fdeceb",
+                        color: r.smtp_configured ? "#1e7a34" : "#b3261e",
+                      }}
+                    >
+                      {r.smtp_configured ? "SMTP set" : "Needs SMTP"}
+                    </span>
+                  </td>
                   <td>
                     <button
                       type="button"
@@ -231,6 +248,74 @@ export default function Membership() {
               onChange={handleChange}
               required
               minLength={8}
+            />
+          </div>
+
+          <h3 style={{ marginTop: "28px", marginBottom: "4px" }}>
+            Email (SMTP) — optional, can be added later in their Settings
+          </h3>
+          <p style={{ marginBottom: "16px", opacity: 0.8 }}>
+            Set this now so guest emails and visit follow-ups work immediately,
+            without the restaurant needing to log in and configure it themselves.
+          </p>
+
+          <div className="form-group">
+            <label htmlFor="smtpHost">SMTP Host</label>
+            <input
+              id="smtpHost"
+              name="smtpHost"
+              type="text"
+              placeholder="smtp.gmail.com"
+              value={form.smtpHost}
+              onChange={handleChange}
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="smtpPort">SMTP Port</label>
+            <input
+              id="smtpPort"
+              name="smtpPort"
+              type="text"
+              placeholder="587"
+              value={form.smtpPort}
+              onChange={handleChange}
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="smtpUser">Email Address</label>
+            <input
+              id="smtpUser"
+              name="smtpUser"
+              type="email"
+              placeholder="jane@restaurant.com"
+              value={form.smtpUser}
+              onChange={handleChange}
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="smtpPass">Email Password / App Password</label>
+            <input
+              id="smtpPass"
+              name="smtpPass"
+              type="password"
+              placeholder="16-character app password"
+              value={form.smtpPass}
+              onChange={handleChange}
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="googleReviewUrl">Google Review Link</label>
+            <input
+              id="googleReviewUrl"
+              name="googleReviewUrl"
+              type="url"
+              placeholder="https://g.page/r/..."
+              value={form.googleReviewUrl}
+              onChange={handleChange}
             />
           </div>
 
