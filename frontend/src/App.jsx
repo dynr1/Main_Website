@@ -16,6 +16,7 @@ import GuestJoin from "./pages/GuestJoin";
 import Settings from "./pages/Settings";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
+import JoinUs from "./pages/JoinUs";
 
 function SiteLayout({ children }) {
   return (
@@ -99,7 +100,21 @@ function App() {
   }
 />
       <Route
-        path="/membership"
+        path="/join-us"
+        element={
+          <SiteLayout>
+            <JoinUs />
+          </SiteLayout>
+        }
+      />
+      {/*
+        Admin panel — deliberately NOT linked anywhere in the Navbar or
+        Footer. Only reachable by whoever you give this exact URL to.
+        Still fully protected by AdminGate (password) underneath — this
+        just keeps it from being stumbled on by the public.
+      */}
+      <Route
+        path="/dynr-team-portal"
         element={
           <SiteLayout>
             <AdminGate>

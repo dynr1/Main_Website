@@ -6,9 +6,14 @@ import nodemailer from 'nodemailer'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
+import Stripe from 'stripe'
 import db from './db.js'
 
 dotenv.config()
+
+// Stripe is optional until real keys are set — the app still runs fine
+// without billing configured, it just can't create checkout sessions yet.
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null
 
 // Safety net: log and keep running instead of the whole server dying on an
 // unexpected error somewhere. This is what let /api/register and
@@ -24,6 +29,78 @@ const app = express()
 const PORT = process.env.PORT || 4000
 
 app.use(cors())
+
+// ---------- Stripe webhook ----------
+// Must be registered BEFORE express.json() — Stripe's signature check needs
+// the raw, unparsed request body, not the JSON-parsed object.
+app.post(
+  '/api/stripe-webhook',
+  express.raw({ type: 'application/json' }),
+  (req, res) => {
+    if (!stripe || !process.env.STRIPE_WEBHOOK_SECRET) {
+      console.error('Stripe webhook hit but Stripe is not configured.')
+      return res.status(503).send('Stripe not configured')
+    }
+
+    let event
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        req.headers['stripe-signature'],
+        process.env.STRIPE_WEBHOOK_SECRET
+      )
+    } catch (err) {
+      console.error('Stripe webhook signature verification failed:', err.message)
+      return res.status(400).send(`Webhook Error: ${err.message}`)
+    }
+
+    try {
+      switch (event.type) {
+        // Subscription started successfully via Checkout.
+        case 'checkout.session.completed': {
+          const session = event.data.object
+          const memberId = session.client_reference_id
+          if (memberId) {
+            db.prepare(
+              'UPDATE members SET payment_status = ?, stripe_customer_id = ?, stripe_subscription_id = ? WHERE id = ?'
+            ).run('paid', session.customer, session.subscription, memberId)
+          }
+          break
+        }
+        // Each successful renewal payment — keep them marked paid.
+        case 'invoice.paid': {
+          const invoice = event.data.object
+          if (invoice.customer) {
+            db.prepare('UPDATE members SET payment_status = ? WHERE stripe_customer_id = ?').run(
+              'paid',
+              invoice.customer
+            )
+          }
+          break
+        }
+        // A renewal payment failed or the subscription was cancelled — flip back to unpaid.
+        case 'invoice.payment_failed':
+        case 'customer.subscription.deleted': {
+          const obj = event.data.object
+          if (obj.customer) {
+            db.prepare('UPDATE members SET payment_status = ? WHERE stripe_customer_id = ?').run(
+              'unpaid',
+              obj.customer
+            )
+          }
+          break
+        }
+        default:
+          break
+      }
+      return res.json({ received: true })
+    } catch (err) {
+      console.error('Failed to process Stripe webhook event:', err)
+      return res.status(500).send('Webhook processing error')
+    }
+  }
+)
+
 app.use(express.json())
 
 // Basic abuse protection: 5 submissions per IP per 15 minutes
@@ -86,6 +163,14 @@ function slugify(text) {
     .replace(/(^-|-$)/g, '')
 }
 
+// Fills {{placeholders}} in a restaurant's custom email text.
+// Unknown placeholders are left as-is rather than throwing.
+function fillTemplate(template, vars) {
+  return template.replace(/{{\s*(\w+)\s*}}/g, (match, key) =>
+    key in vars ? String(vars[key]) : match
+  )
+}
+
 function generateMembershipNumber(restaurantName, count) {
   const initials = restaurantName
     .split(' ')
@@ -130,6 +215,48 @@ ${message || '—'}
     return res.status(200).json({ ok: true })
   } catch (err) {
     console.error('Failed to send contact email:', err)
+    return res.status(500).json({ error: 'Failed to send your message. Please try again shortly.' })
+  }
+})
+
+// ---------- Public: "Become a member" inquiry from the Join Us page ----------
+// Restaurants don't self-register — this just notifies you so you can follow
+// up and create their account manually via the admin panel.
+app.post('/api/membership-inquiry', contactLimiter, async (req, res) => {
+  const { restaurantName, contactName, email, phone, message } = req.body || {}
+
+  if (!restaurantName || !contactName || !email) {
+    return res.status(400).json({ error: 'Restaurant name, your name, and email are required.' })
+  }
+
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ error: 'Please enter a valid email address.' })
+  }
+
+  const mailBody = `
+New "Become a Member" inquiry from dynr.co.uk
+
+Restaurant: ${restaurantName}
+Contact name: ${contactName}
+Email: ${email}
+Phone: ${phone || '—'}
+
+Message:
+${message || '—'}
+`.trim()
+
+  try {
+    await transporter.sendMail({
+      from: process.env.MAIL_FROM || '"dynR Website" <no-reply@dynr.co.uk>',
+      to: process.env.MAIL_TO || 'hello@dynr.co.uk',
+      replyTo: email,
+      subject: `New membership inquiry — ${restaurantName}`,
+      text: mailBody,
+    })
+
+    return res.status(200).json({ ok: true })
+  } catch (err) {
+    console.error('Failed to send membership inquiry email:', err)
     return res.status(500).json({ error: 'Failed to send your message. Please try again shortly.' })
   }
 })
@@ -328,6 +455,42 @@ app.put('/api/admin/restaurants/:id/payment', requireAdmin, (req, res) => {
   return res.json({ ok: true })
 })
 
+// ---------- Admin: Delete a restaurant (and all their data) ----------
+// Cascades manually since node:sqlite doesn't enforce ON DELETE CASCADE
+// by default — deletes guest_notes and visits for their guests, then
+// scheduled_emails, then the guests themselves, then the member. Order
+// matters here because of the foreign key references.
+app.delete('/api/admin/restaurants/:id', requireAdmin, (req, res) => {
+  const restaurantId = req.params.id
+
+  const existing = db.prepare('SELECT id, restaurant_name FROM members WHERE id = ?').get(restaurantId)
+  if (!existing) {
+    return res.status(404).json({ error: 'Restaurant not found.' })
+  }
+
+  try {
+    const guestIds = db
+      .prepare('SELECT id FROM guests WHERE restaurant_id = ?')
+      .all(restaurantId)
+      .map((g) => g.id)
+
+    for (const guestId of guestIds) {
+      db.prepare('DELETE FROM guest_notes WHERE guest_id = ?').run(guestId)
+      db.prepare('DELETE FROM visits WHERE guest_id = ?').run(guestId)
+    }
+
+    db.prepare('DELETE FROM scheduled_emails WHERE restaurant_id = ?').run(restaurantId)
+    db.prepare('DELETE FROM guests WHERE restaurant_id = ?').run(restaurantId)
+    db.prepare('DELETE FROM password_resets WHERE member_id = ?').run(restaurantId)
+    db.prepare('DELETE FROM members WHERE id = ?').run(restaurantId)
+
+    return res.json({ ok: true, deleted: existing.restaurant_name })
+  } catch (err) {
+    console.error(`Failed to delete restaurant id ${restaurantId}:`, err)
+    return res.status(500).json({ error: 'Failed to delete restaurant. Please try again.' })
+  }
+})
+
 // ---------- Membership: Restaurant Sign In ----------
 app.post('/api/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body || {}
@@ -429,6 +592,35 @@ app.post('/api/reset-password', async (req, res) => {
   return res.json({ ok: true })
 })
 
+// ---------- Billing: Create a Stripe Checkout session for the logged-in restaurant ----------
+app.post('/api/create-checkout-session', requireAuth, async (req, res) => {
+  if (!stripe || !process.env.STRIPE_PRICE_ID) {
+    return res.status(503).json({ error: 'Billing is not configured yet. Please contact dynR.' })
+  }
+
+  const member = db.prepare('SELECT * FROM members WHERE id = ?').get(req.memberId)
+  if (!member) {
+    return res.status(404).json({ error: 'Restaurant not found.' })
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
+      customer_email: member.stripe_customer_id ? undefined : member.email,
+      customer: member.stripe_customer_id || undefined,
+      client_reference_id: String(member.id),
+      success_url: `${process.env.APP_URL || 'https://dynr.co.uk'}/settings?billing=success`,
+      cancel_url: `${process.env.APP_URL || 'https://dynr.co.uk'}/settings?billing=cancelled`,
+    })
+
+    return res.json({ url: session.url })
+  } catch (err) {
+    console.error('Failed to create Stripe checkout session:', err)
+    return res.status(500).json({ error: 'Failed to start checkout. Please try again.' })
+  }
+})
+
 // ---------- Membership: Current member info (for dashboard) ----------
 app.get('/api/member/me', requireAuth, (req, res) => {
   const member = db
@@ -504,18 +696,29 @@ app.post('/api/public/guests', async (req, res) => {
           },
         })
 
-        await restaurantTransporter.sendMail({
-          from: restaurant.smtp_user,
-          to: email,
-          subject: `You're one of ours now, ${name.split(' ')[0]}`,
-          text: `Welcome to the family, ${name.split(' ')[0]}!
+        const defaultWelcomeText = `Welcome to the family, ${name.split(' ')[0]}!
 
 Thank you for becoming part of the ${restaurant.restaurant_name} family — we're so glad to have you. Keep an eye on your inbox for exciting member-only offers and news, just for members like you.
 
 Your membership number: ${membershipNumber}
 
 Warmly,
-The ${restaurant.restaurant_name} team`,
+The ${restaurant.restaurant_name} team`
+
+        const welcomeText = restaurant.welcome_email_text
+          ? fillTemplate(restaurant.welcome_email_text, {
+              first_name: name.split(' ')[0],
+              name,
+              restaurant_name: restaurant.restaurant_name,
+              membership_number: membershipNumber,
+            })
+          : defaultWelcomeText
+
+        await restaurantTransporter.sendMail({
+          from: restaurant.smtp_user,
+          to: email,
+          subject: `You're one of ours now, ${name.split(' ')[0]}`,
+          text: welcomeText,
         })
       } catch (mailErr) {
         console.error('Failed to send guest welcome email:', mailErr)
@@ -577,6 +780,23 @@ app.post('/api/guests/:id/visit', requireAuth, (req, res) => {
 })
 
 // ---------- Guests: add a note ----------
+// ---------- Guests: list all notes for a guest ----------
+app.get('/api/guests/:id/notes', requireAuth, (req, res) => {
+  const guest = db
+    .prepare('SELECT id FROM guests WHERE id = ? AND restaurant_id = ?')
+    .get(req.params.id, req.memberId)
+
+  if (!guest) {
+    return res.status(404).json({ error: 'Guest not found.' })
+  }
+
+  const notes = db
+    .prepare('SELECT id, note_text, created_at FROM guest_notes WHERE guest_id = ? ORDER BY created_at DESC')
+    .all(guest.id)
+
+  return res.json({ notes })
+})
+
 app.post('/api/guests/:id/notes', requireAuth, (req, res) => {
   const { noteText } = req.body || {}
 
@@ -592,10 +812,40 @@ app.post('/api/guests/:id/notes', requireAuth, (req, res) => {
     return res.status(404).json({ error: 'Guest not found.' })
   }
 
-  db.prepare('INSERT INTO guest_notes (guest_id, note_text) VALUES (?, ?)').run(
-    guest.id,
-    noteText.trim()
-  )
+  const result = db
+    .prepare('INSERT INTO guest_notes (guest_id, note_text) VALUES (?, ?)')
+    .run(guest.id, noteText.trim())
+
+  return res.json({ ok: true, noteId: Number(result.lastInsertRowid) })
+})
+
+// ---------- Guests: edit an existing note ----------
+// Previous notes are never overwritten by this — only the one note whose id
+// is in the URL changes. The full history stays intact and visible.
+app.put('/api/guests/:guestId/notes/:noteId', requireAuth, (req, res) => {
+  const { noteText } = req.body || {}
+
+  if (!noteText || !noteText.trim()) {
+    return res.status(400).json({ error: 'Note text is required.' })
+  }
+
+  const guest = db
+    .prepare('SELECT id FROM guests WHERE id = ? AND restaurant_id = ?')
+    .get(req.params.guestId, req.memberId)
+
+  if (!guest) {
+    return res.status(404).json({ error: 'Guest not found.' })
+  }
+
+  const note = db
+    .prepare('SELECT id FROM guest_notes WHERE id = ? AND guest_id = ?')
+    .get(req.params.noteId, guest.id)
+
+  if (!note) {
+    return res.status(404).json({ error: 'Note not found.' })
+  }
+
+  db.prepare('UPDATE guest_notes SET note_text = ? WHERE id = ?').run(noteText.trim(), note.id)
 
   return res.json({ ok: true })
 })
@@ -659,7 +909,9 @@ app.post('/api/guests/message', requireAuth, async (req, res) => {
 app.get('/api/settings', requireAuth, (req, res) => {
   const member = db
     .prepare(
-      'SELECT smtp_host, smtp_port, smtp_user, smtp_pass, google_review_url FROM members WHERE id = ?'
+      `SELECT smtp_host, smtp_port, smtp_user, smtp_pass, google_review_url,
+              welcome_email_text, followup_email_text, payment_status
+       FROM members WHERE id = ?`
     )
     .get(req.memberId)
 
@@ -675,9 +927,10 @@ app.get('/api/settings', requireAuth, (req, res) => {
   return res.json({ settings: { ...safeMember, smtp_configured: !!smtp_pass } })
 })
 
-// ---------- Settings: Update SMTP + Google review link ----------
+// ---------- Settings: Update SMTP + Google review link + email templates ----------
 app.put('/api/settings', requireAuth, (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, googleReviewUrl } = req.body || {}
+  const { smtpHost, smtpPort, smtpUser, smtpPass, googleReviewUrl, welcomeEmailText, followupEmailText } =
+    req.body || {}
 
   try {
     // If smtpPass is left blank, keep whatever password is already saved
@@ -686,15 +939,34 @@ app.put('/api/settings', requireAuth, (req, res) => {
     if (smtpPass && smtpPass.trim()) {
       db.prepare(
         `UPDATE members
-         SET smtp_host = ?, smtp_port = ?, smtp_user = ?, smtp_pass = ?, google_review_url = ?
+         SET smtp_host = ?, smtp_port = ?, smtp_user = ?, smtp_pass = ?, google_review_url = ?,
+             welcome_email_text = ?, followup_email_text = ?
          WHERE id = ?`
-      ).run(smtpHost || null, smtpPort || null, smtpUser || null, smtpPass, googleReviewUrl || null, req.memberId)
+      ).run(
+        smtpHost || null,
+        smtpPort || null,
+        smtpUser || null,
+        smtpPass,
+        googleReviewUrl || null,
+        welcomeEmailText || null,
+        followupEmailText || null,
+        req.memberId
+      )
     } else {
       db.prepare(
         `UPDATE members
-         SET smtp_host = ?, smtp_port = ?, smtp_user = ?, google_review_url = ?
+         SET smtp_host = ?, smtp_port = ?, smtp_user = ?, google_review_url = ?,
+             welcome_email_text = ?, followup_email_text = ?
          WHERE id = ?`
-      ).run(smtpHost || null, smtpPort || null, smtpUser || null, googleReviewUrl || null, req.memberId)
+      ).run(
+        smtpHost || null,
+        smtpPort || null,
+        smtpUser || null,
+        googleReviewUrl || null,
+        welcomeEmailText || null,
+        followupEmailText || null,
+        req.memberId
+      )
     }
 
     return res.json({ ok: true })
@@ -711,7 +983,8 @@ async function sendDueScheduledEmails() {
     due = db
       .prepare(
         `SELECT se.id as scheduled_id, g.id as guest_id, g.name, g.email,
-                m.restaurant_name, m.smtp_host, m.smtp_port, m.smtp_user, m.smtp_pass, m.google_review_url
+                m.restaurant_name, m.smtp_host, m.smtp_port, m.smtp_user, m.smtp_pass,
+                m.google_review_url, m.followup_email_text
          FROM scheduled_emails se
          JOIN guests g ON g.id = se.guest_id
          JOIN members m ON m.id = se.restaurant_id
@@ -746,11 +1019,22 @@ async function sendDueScheduledEmails() {
         ? `\n\nIf you enjoyed your visit, we'd love a quick review here: ${row.google_review_url}`
         : ''
 
+      const defaultFollowupText = `Hi ${row.name.split(' ')[0]},\n\nThanks so much for visiting ${row.restaurant_name} today — we hope you had a great time.${reviewLine}\n\nSee you again soon,\nThe ${row.restaurant_name} team`
+
+      const followupText = row.followup_email_text
+        ? fillTemplate(row.followup_email_text, {
+            first_name: row.name.split(' ')[0],
+            name: row.name,
+            restaurant_name: row.restaurant_name,
+            review_link: row.google_review_url || '',
+          })
+        : defaultFollowupText
+
       await restaurantTransporter.sendMail({
         from: row.smtp_user,
         to: row.email,
         subject: `Thanks for visiting ${row.restaurant_name}!`,
-        text: `Hi ${row.name.split(' ')[0]},\n\nThanks so much for visiting ${row.restaurant_name} today — we hope you had a great time.${reviewLine}\n\nSee you again soon,\nThe ${row.restaurant_name} team`,
+        text: followupText,
       })
 
       db.prepare('UPDATE scheduled_emails SET status = ? WHERE id = ?').run('sent', row.scheduled_id)

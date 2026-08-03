@@ -14,6 +14,10 @@ export default function Dashboard() {
   const [messageStatus, setMessageStatus] = useState("idle");
   const [noteText, setNoteText] = useState("");
   const [showNoteBox, setShowNoteBox] = useState(false);
+  const [guestNotes, setGuestNotes] = useState([]);
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [editingNoteId, setEditingNoteId] = useState(null);
+  const [editingNoteText, setEditingNoteText] = useState("");
 
   const token = sessionStorage.getItem("dynr_token");
 
@@ -45,6 +49,31 @@ export default function Dashboard() {
     loadDashboardData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function loadGuestNotes(guestId) {
+    setNotesLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/api/guests/${guestId}/notes`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (res.ok) setGuestNotes(data.notes || []);
+    } catch (err) {
+      console.error("Failed to load notes:", err);
+    } finally {
+      setNotesLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (activeGuest) {
+      loadGuestNotes(activeGuest.id);
+      setEditingNoteId(null);
+    } else {
+      setGuestNotes([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeGuest?.id]);
 
   function toggleSelect(id) {
     setSelected((prev) =>
@@ -91,10 +120,38 @@ export default function Dashboard() {
       if (res.ok) {
         setNoteText("");
         setShowNoteBox(false);
+        loadGuestNotes(guestId);
         loadDashboardData();
       }
     } catch (err) {
       console.error("Failed to add note:", err);
+    }
+  }
+
+  function startEditingNote(note) {
+    setEditingNoteId(note.id);
+    setEditingNoteText(note.note_text);
+  }
+
+  async function handleSaveEditedNote(guestId) {
+    if (!editingNoteText.trim()) return;
+    try {
+      const res = await fetch(`${API_URL}/api/guests/${guestId}/notes/${editingNoteId}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ noteText: editingNoteText }),
+      });
+      if (res.ok) {
+        setEditingNoteId(null);
+        setEditingNoteText("");
+        loadGuestNotes(guestId);
+        loadDashboardData();
+      }
+    } catch (err) {
+      console.error("Failed to edit note:", err);
     }
   }
 
@@ -282,8 +339,77 @@ export default function Dashboard() {
                 </p>
 
                 <h4>Notes</h4>
-                <div className="dash-notes-box">
-                  {activeGuest.latest_note || "No notes yet."}
+                <div className="dash-notes-box" style={{ display: "block", padding: 0, background: "none" }}>
+                  {notesLoading ? (
+                    <p style={{ padding: 12 }}>Loading notes…</p>
+                  ) : guestNotes.length === 0 ? (
+                    <p style={{ padding: 12 }}>No notes yet.</p>
+                  ) : (
+                    guestNotes.map((note) => (
+                      <div
+                        key={note.id}
+                        style={{
+                          padding: 10,
+                          marginBottom: 8,
+                          background: "#f7f5f2",
+                          borderRadius: 8,
+                        }}
+                      >
+                        {editingNoteId === note.id ? (
+                          <>
+                            <textarea
+                              className="dash-modal-textarea"
+                              value={editingNoteText}
+                              onChange={(e) => setEditingNoteText(e.target.value)}
+                              rows={3}
+                              style={{ width: "100%", marginBottom: 8 }}
+                            />
+                            <div style={{ display: "flex", gap: 8 }}>
+                              <button
+                                type="button"
+                                className="dash-sidebar-btn"
+                                style={{ width: "auto", padding: "6px 12px", marginBottom: 0 }}
+                                onClick={() => setEditingNoteId(null)}
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                className="dash-sidebar-btn is-primary"
+                                style={{ width: "auto", padding: "6px 12px", marginBottom: 0 }}
+                                onClick={() => handleSaveEditedNote(activeGuest.id)}
+                              >
+                                Save
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <p style={{ marginBottom: 6, whiteSpace: "pre-wrap" }}>{note.note_text}</p>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                              <span style={{ fontSize: 12, opacity: 0.6 }}>
+                                {note.created_at?.slice(0, 10)}
+                              </span>
+                              <button
+                                type="button"
+                                style={{
+                                  background: "none",
+                                  border: "none",
+                                  cursor: "pointer",
+                                  fontSize: 12,
+                                  textDecoration: "underline",
+                                  opacity: 0.75,
+                                }}
+                                onClick={() => startEditingNote(note)}
+                              >
+                                Edit
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ))
+                  )}
                 </div>
 
                 <h4>Visit history</h4>

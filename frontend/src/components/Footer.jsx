@@ -1,3 +1,5 @@
+import { Link } from "react-router-dom";
+
 export default function Footer(){
 
 return (
@@ -9,6 +11,10 @@ return (
 <span>
 © 2026 dynR. All rights reserved.
 </span>
+
+<Link to="/login" style={{ fontSize: "0.85em", opacity: 0.7 }}>
+  Restaurant Sign In
+</Link>
 
 </div>
 </footer>

@@ -41,6 +41,10 @@ addColumnIfMissing('members', 'smtp_pass', 'TEXT')
 addColumnIfMissing('members', 'google_review_url', 'TEXT')
 addColumnIfMissing('members', 'slug', 'TEXT')
 addColumnIfMissing('members', 'payment_status', "TEXT NOT NULL DEFAULT 'unpaid'")
+addColumnIfMissing('members', 'stripe_customer_id', 'TEXT')
+addColumnIfMissing('members', 'stripe_subscription_id', 'TEXT')
+addColumnIfMissing('members', 'welcome_email_text', 'TEXT')
+addColumnIfMissing('members', 'followup_email_text', 'TEXT')
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS guests (
