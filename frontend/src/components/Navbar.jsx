@@ -52,8 +52,8 @@ export default function Navbar() {
           For Restaurants
         </Link>
 
-        <Link className={isActive("/join-us")} to="/join-us">
-          Join Us
+        <Link className={isActive("/get-started")} to="/get-started">
+          Get Started
         </Link>
 
         <Link className={isActive("/contact")} to="/contact">

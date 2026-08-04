@@ -16,7 +16,7 @@ import GuestJoin from "./pages/GuestJoin";
 import Settings from "./pages/Settings";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
-import JoinUs from "./pages/JoinUs";
+import GetStarted from "./pages/GetStarted";
 
 function SiteLayout({ children }) {
   return (
@@ -100,10 +100,10 @@ function App() {
   }
 />
       <Route
-        path="/join-us"
+        path="/get-started"
         element={
           <SiteLayout>
-            <JoinUs />
+            <GetStarted />
           </SiteLayout>
         }
       />
