@@ -35,10 +35,7 @@ export default function Navbar() {
         </Link>
       </div>
 
-      <nav
-        className={`nav-dropdown ${open ? "is-open" : ""}`}
-        onClick={(e) => e.stopPropagation()}
-      >
+      <nav className={`nav-dropdown ${open ? "is-open" : ""}`}>
         <Link className={isActive("/")} to="/">
           Home
         </Link>

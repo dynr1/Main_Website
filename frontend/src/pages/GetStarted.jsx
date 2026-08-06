@@ -197,7 +197,7 @@ export default function GetStarted() {
             </div>
 
             <a
-              href="mailto:hello@dynr.co.uk?subject=Book%20a%20Free%20Demo"
+              href="/contact"
               className="btn"
               style={{ textDecoration: "none" }}
             >
