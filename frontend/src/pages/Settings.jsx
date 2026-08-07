@@ -14,13 +14,10 @@ export default function Settings() {
     followupEmailText: "",
   });
   const [smtpConfigured, setSmtpConfigured] = useState(false);
-  const [paymentStatus, setPaymentStatus] = useState("unpaid");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
-  const [billingLoading, setBillingLoading] = useState(false);
-  const [billingError, setBillingError] = useState("");
 
   const token = sessionStorage.getItem("dynr_token");
 
@@ -43,7 +40,6 @@ export default function Settings() {
             followupEmailText: data.settings.followup_email_text || "",
           });
           setSmtpConfigured(!!data.settings.smtp_configured);
-          setPaymentStatus(data.settings.payment_status || "unpaid");
         }
       } catch (err) {
         console.error("Failed to load settings:", err);
@@ -93,27 +89,6 @@ export default function Settings() {
     }
   }
 
-  async function handleSubscribe() {
-    setBillingError("");
-    setBillingLoading(true);
-    try {
-      const res = await fetch(`${API_URL}/api/create-checkout-session`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-
-      if (!res.ok || !data.url) {
-        throw new Error(data?.error || "Failed to start checkout.");
-      }
-
-      window.location.href = data.url;
-    } catch (err) {
-      setBillingError(err.message);
-      setBillingLoading(false);
-    }
-  }
-
   if (loading) return null;
 
   return (
@@ -158,28 +133,6 @@ export default function Settings() {
               <p className="dash-subtitle" style={{ marginBottom: 24 }}>
                 Connect your own email so messages send from your restaurant, not dynR.
               </p>
-
-              <div style={{ marginBottom: 28, padding: 16, background: "#f7f5f2", borderRadius: 8 }}>
-                <h4 style={{ marginBottom: 8 }}>Billing</h4>
-                {paymentStatus === "paid" ? (
-                  <p style={{ color: "#1e7a34" }}>Your subscription is active.</p>
-                ) : (
-                  <>
-                    <p style={{ marginBottom: 12 }}>
-                      Your subscription isn't active yet.
-                    </p>
-                    {billingError && <div className="form-error">{billingError}</div>}
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={handleSubscribe}
-                      disabled={billingLoading}
-                    >
-                      {billingLoading ? "Redirecting…" : "Subscribe now"}
-                    </button>
-                  </>
-                )}
-              </div>
 
               <form onSubmit={handleSubmit}>
                 <h4 style={{ marginBottom: 12 }}>Email (SMTP)</h4>

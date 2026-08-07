@@ -5,7 +5,6 @@ const initialForm = {
   restaurantName: "",
   email: "",
   phone: "",
-  password: "",
   smtpHost: "",
   smtpPort: "",
   smtpUser: "",
@@ -23,6 +22,7 @@ export default function Membership() {
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState("");
   const [togglingId, setTogglingId] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
 
   const adminToken = sessionStorage.getItem("dynr_admin_token");
 
@@ -68,6 +68,27 @@ export default function Membership() {
       setListError("Failed to update payment status. Please try again.");
     } finally {
       setTogglingId(null);
+    }
+  }
+
+  async function deleteRestaurant(restaurant) {
+    const confirmed = window.confirm(
+      `Delete "${restaurant.restaurant_name}"? This permanently removes them and all of their guests, visits, and notes. This can't be undone.`
+    );
+    if (!confirmed) return;
+
+    setDeletingId(restaurant.id);
+    try {
+      const res = await fetch(`${API_URL}/api/admin/restaurants/${restaurant.id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      if (!res.ok) throw new Error();
+      setRestaurants((prev) => prev.filter((r) => r.id !== restaurant.id));
+    } catch (err) {
+      setListError("Failed to delete restaurant. Please try again.");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -131,6 +152,7 @@ export default function Membership() {
                 <th>Registered</th>
                 <th>Sending</th>
                 <th>Payment</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -171,6 +193,22 @@ export default function Membership() {
                         : "Unpaid — click to mark paid"}
                     </button>
                   </td>
+                  <td>
+                    <button
+                      type="button"
+                      className="dash-tag"
+                      style={{
+                        cursor: "pointer",
+                        border: "1px solid #f3c2bd",
+                        background: "#fff",
+                        color: "#b3261e",
+                      }}
+                      onClick={() => deleteRestaurant(r)}
+                      disabled={deletingId === r.id}
+                    >
+                      {deletingId === r.id ? "Deleting…" : "Delete"}
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -179,7 +217,7 @@ export default function Membership() {
 
         <span className="eyebrow">Admin — Add Member Restaurant</span>
         <h1 style={{ marginTop: "14px", marginBottom: "32px" }}>
-          Create a restaurant account
+          Set up a new restaurant
         </h1>
 
         {error && <div className="form-error">{error}</div>}
@@ -193,8 +231,8 @@ export default function Membership() {
               borderColor: "#bfe6c8",
             }}
           >
-            Restaurant account created — a welcome email with their dashboard
-            login has been sent.
+            Restaurant account created — an email with their password setup
+            link and payment link has been sent.
           </div>
         )}
 
@@ -234,20 +272,6 @@ export default function Membership() {
               placeholder="07123 456789"
               value={form.phone}
               onChange={handleChange}
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="password">Dashboard Password</label>
-            <input
-              id="password"
-              name="password"
-              type="password"
-              placeholder="At least 8 characters"
-              value={form.password}
-              onChange={handleChange}
-              required
-              minLength={8}
             />
           </div>
 
@@ -320,7 +344,7 @@ export default function Membership() {
           </div>
 
           <button type="submit" className="btn" disabled={loading}>
-            {loading ? "Creating account…" : "Create Account & Send Login"}
+            {loading ? "Sending…" : "Set Up Payment Method & Send Login"}
           </button>
         </form>
       </div>

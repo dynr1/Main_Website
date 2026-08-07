@@ -13,7 +13,9 @@ dotenv.config()
 
 // Stripe is optional until real keys are set — the app still runs fine
 // without billing configured, it just can't create checkout sessions yet.
-const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2025-03-31.basil' })
+  : null
 
 // Safety net: log and keep running instead of the whole server dying on an
 // unexpected error somewhere. This is what let /api/register and
@@ -328,7 +330,6 @@ app.post('/api/register', requireAdmin, async (req, res) => {
     restaurantName,
     email,
     phone,
-    password,
     smtpHost,
     smtpPort,
     smtpUser,
@@ -336,16 +337,12 @@ app.post('/api/register', requireAdmin, async (req, res) => {
     googleReviewUrl,
   } = req.body || {}
 
-  if (!restaurantName || !email || !password) {
-    return res.status(400).json({ error: 'Restaurant name, email, and password are required.' })
+  if (!restaurantName || !email) {
+    return res.status(400).json({ error: 'Restaurant name and email are required.' })
   }
 
   if (!isValidEmail(email)) {
     return res.status(400).json({ error: 'Please enter a valid email address.' })
-  }
-
-  if (password.length < 8) {
-    return res.status(400).json({ error: 'Password must be at least 8 characters.' })
   }
 
   const existing = db.prepare('SELECT id FROM members WHERE email = ?').get(email)
@@ -354,7 +351,11 @@ app.post('/api/register', requireAdmin, async (req, res) => {
   }
 
   try {
-    const passwordHash = await bcrypt.hash(password, 10)
+    // No password comes from the admin anymore — generate a random one the
+    // restaurant will never see or use. They set their own via the reset
+    // link emailed below, same flow as forgot-password.
+    const randomPassword = crypto.randomBytes(24).toString('hex')
+    const passwordHash = await bcrypt.hash(randomPassword, 10)
     const slug = slugify(restaurantName)
 
     const result = db
@@ -377,21 +378,37 @@ app.post('/api/register', requireAdmin, async (req, res) => {
         googleReviewUrl || null
       )
 
-    // Email the restaurant their dashboard login details
+    const memberId = result.lastInsertRowid
+
+    const resetToken = crypto.randomBytes(32).toString('hex')
+    const resetExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() // 7 days — more time than a normal reset, since this is their first login
+    db.prepare(
+      'INSERT INTO password_resets (member_id, token, expires_at) VALUES (?, ?, ?)'
+    ).run(memberId, resetToken, resetExpiresAt)
+
+    const appUrl = process.env.APP_URL || 'https://dynr.co.uk'
+    const setPasswordUrl = `${appUrl}/reset-password?token=${resetToken}`
+    const paymentUrl = process.env.STRIPE_PAYMENT_LINK
+      ? `${process.env.STRIPE_PAYMENT_LINK}?client_reference_id=${memberId}`
+      : null
+
+    // Email the restaurant their set-password link and payment link
     try {
       await transporter.sendMail({
         from: process.env.MAIL_FROM || '"dynR" <no-reply@dynr.co.uk>',
         to: email,
-        subject: 'Your dynR dashboard is ready',
+        subject: 'Set up your dynR account',
         text: `Hi ${restaurantName},
 
-Your dynR account has been created. Here are your dashboard login details:
+Welcome to dynR! Two quick steps to get set up:
 
-Login page: ${process.env.APP_URL || 'https://dynr.co.uk'}/login
-Email: ${email}
-Password: ${password}
+1. Set your dashboard password:
+${setPasswordUrl}
+(This link is valid for 7 days.)
 
-We'd recommend changing your password after your first login.
+${paymentUrl ? `2. Set up your payment method to activate your subscription:\n${paymentUrl}` : '2. We\'ll be in touch shortly to set up your payment method.'}
+
+Once both are done, sign in at ${appUrl}/login with the email address this was sent to.
 
 Welcome aboard,
 The dynR team`,
@@ -402,7 +419,7 @@ The dynR team`,
       console.error('Failed to send welcome email to restaurant:', mailErr)
     }
 
-    return res.status(201).json({ ok: true, restaurantId: result.lastInsertRowid })
+    return res.status(201).json({ ok: true, restaurantId: memberId })
   } catch (err) {
     console.error('Registration failed:', err)
     return res.status(500).json({ error: 'Registration failed. Please try again.' })
@@ -590,35 +607,6 @@ app.post('/api/reset-password', async (req, res) => {
   db.prepare('UPDATE password_resets SET used = 1 WHERE id = ?').run(resetRow.id)
 
   return res.json({ ok: true })
-})
-
-// ---------- Billing: Create a Stripe Checkout session for the logged-in restaurant ----------
-app.post('/api/create-checkout-session', requireAuth, async (req, res) => {
-  if (!stripe || !process.env.STRIPE_PRICE_ID) {
-    return res.status(503).json({ error: 'Billing is not configured yet. Please contact dynR.' })
-  }
-
-  const member = db.prepare('SELECT * FROM members WHERE id = ?').get(req.memberId)
-  if (!member) {
-    return res.status(404).json({ error: 'Restaurant not found.' })
-  }
-
-  try {
-    const session = await stripe.checkout.sessions.create({
-      mode: 'subscription',
-      line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
-      customer_email: member.stripe_customer_id ? undefined : member.email,
-      customer: member.stripe_customer_id || undefined,
-      client_reference_id: String(member.id),
-      success_url: `${process.env.APP_URL || 'https://dynr.co.uk'}/settings?billing=success`,
-      cancel_url: `${process.env.APP_URL || 'https://dynr.co.uk'}/settings?billing=cancelled`,
-    })
-
-    return res.json({ url: session.url })
-  } catch (err) {
-    console.error('Failed to create Stripe checkout session:', err)
-    return res.status(500).json({ error: 'Failed to start checkout. Please try again.' })
-  }
 })
 
 // ---------- Membership: Current member info (for dashboard) ----------
