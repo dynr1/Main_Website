@@ -330,6 +330,7 @@ app.post('/api/register', requireAdmin, async (req, res) => {
     restaurantName,
     email,
     phone,
+    password,
     smtpHost,
     smtpPort,
     smtpUser,
@@ -337,12 +338,20 @@ app.post('/api/register', requireAdmin, async (req, res) => {
     googleReviewUrl,
   } = req.body || {}
 
-  if (!restaurantName || !email) {
-    return res.status(400).json({ error: 'Restaurant name and email are required.' })
+  if (!restaurantName || !email || !password) {
+    return res.status(400).json({ error: 'Restaurant name, email, and password are required.' })
   }
 
   if (!isValidEmail(email)) {
     return res.status(400).json({ error: 'Please enter a valid email address.' })
+  }
+
+  if (password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters.' })
+  }
+
+  if (!stripe || !process.env.STRIPE_PRICE_ID) {
+    return res.status(503).json({ error: 'Billing is not configured yet — set STRIPE_SECRET_KEY and STRIPE_PRICE_ID first.' })
   }
 
   const existing = db.prepare('SELECT id FROM members WHERE email = ?').get(email)
@@ -351,25 +360,25 @@ app.post('/api/register', requireAdmin, async (req, res) => {
   }
 
   try {
-    // No password comes from the admin anymore — generate a random one the
-    // restaurant will never see or use. They set their own via the reset
-    // link emailed below, same flow as forgot-password.
-    const randomPassword = crypto.randomBytes(24).toString('hex')
-    const passwordHash = await bcrypt.hash(randomPassword, 10)
+    const passwordHash = await bcrypt.hash(password, 10)
     const slug = slugify(restaurantName)
 
+    // Keep the plaintext password briefly — it's needed to include in the
+    // confirmation email once payment succeeds (bcrypt hashes can't be
+    // reversed). Cleared immediately after that email is sent.
     const result = db
       .prepare(
         `INSERT INTO members
-          (restaurant_name, email, phone, password_hash, is_paid, slug,
+          (restaurant_name, email, phone, password_hash, pending_password, is_paid, slug,
            smtp_host, smtp_port, smtp_user, smtp_pass, google_review_url)
-         VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         restaurantName,
         email,
         phone || null,
         passwordHash,
+        password,
         slug,
         smtpHost || null,
         smtpPort || null,
@@ -379,50 +388,91 @@ app.post('/api/register', requireAdmin, async (req, res) => {
       )
 
     const memberId = result.lastInsertRowid
-
-    const resetToken = crypto.randomBytes(32).toString('hex')
-    const resetExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() // 7 days — more time than a normal reset, since this is their first login
-    db.prepare(
-      'INSERT INTO password_resets (member_id, token, expires_at) VALUES (?, ?, ?)'
-    ).run(memberId, resetToken, resetExpiresAt)
-
     const appUrl = process.env.APP_URL || 'https://dynr.co.uk'
-    const setPasswordUrl = `${appUrl}/reset-password?token=${resetToken}`
-    const paymentUrl = process.env.STRIPE_PAYMENT_LINK
-      ? `${process.env.STRIPE_PAYMENT_LINK}?client_reference_id=${memberId}`
-      : null
 
-    // Email the restaurant their set-password link and payment link
-    try {
-      await transporter.sendMail({
-        from: process.env.MAIL_FROM || '"dynR" <no-reply@dynr.co.uk>',
-        to: email,
-        subject: 'Set up your dynR account',
-        text: `Hi ${restaurantName},
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
+      customer_email: email,
+      client_reference_id: String(memberId),
+      success_url: `${appUrl}/account-created?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${appUrl}/dynr-team-portal?payment=cancelled`,
+    })
 
-Welcome to dynR! Two quick steps to get set up:
-
-1. Set your dashboard password:
-${setPasswordUrl}
-(This link is valid for 7 days.)
-
-${paymentUrl ? `2. Set up your payment method to activate your subscription:\n${paymentUrl}` : '2. We\'ll be in touch shortly to set up your payment method.'}
-
-Once both are done, sign in at ${appUrl}/login with the email address this was sent to.
-
-Welcome aboard,
-The dynR team`,
-      })
-    } catch (mailErr) {
-      // Don't fail the whole registration if the email fails to send —
-      // the account is already created, just log it so you notice.
-      console.error('Failed to send welcome email to restaurant:', mailErr)
-    }
-
-    return res.status(201).json({ ok: true, restaurantId: memberId })
+    return res.status(201).json({ ok: true, restaurantId: memberId, checkoutUrl: session.url })
   } catch (err) {
     console.error('Registration failed:', err)
     return res.status(500).json({ error: 'Registration failed. Please try again.' })
+  }
+})
+
+// ---------- Public: Confirm a Stripe payment and send the login email ----------
+// Called by the /account-created page after Stripe redirects back. Verifies
+// the session directly with Stripe rather than trusting the URL blindly —
+// this works even without a webhook configured.
+app.get('/api/confirm-payment', async (req, res) => {
+  const { session_id } = req.query || {}
+
+  if (!session_id) {
+    return res.status(400).json({ error: 'Missing session ID.' })
+  }
+
+  if (!stripe) {
+    return res.status(503).json({ error: 'Billing is not configured.' })
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.retrieve(session_id)
+
+    if (session.payment_status !== 'paid') {
+      return res.status(402).json({ error: 'Payment has not been completed yet.' })
+    }
+
+    const memberId = session.client_reference_id
+    const member = memberId ? db.prepare('SELECT * FROM members WHERE id = ?').get(memberId) : null
+
+    if (!member) {
+      return res.status(404).json({ error: 'Restaurant not found for this payment.' })
+    }
+
+    db.prepare(
+      'UPDATE members SET payment_status = ?, stripe_customer_id = ?, stripe_subscription_id = ? WHERE id = ?'
+    ).run('paid', session.customer, session.subscription, member.id)
+
+    // Send the confirmation email with their login — only once, using the
+    // pending_password stashed at registration. If it's already been
+    // cleared (e.g. the success page was reloaded), skip re-sending.
+    if (member.pending_password) {
+      try {
+        await transporter.sendMail({
+          from: process.env.MAIL_FROM || '"dynR" <no-reply@dynr.co.uk>',
+          to: member.email,
+          subject: 'Your dynR account is ready',
+          text: `Hi ${member.restaurant_name},
+
+Great news — your payment was successful and your dynR account is now active.
+
+Here are your login details:
+Login page: ${process.env.APP_URL || 'https://dynr.co.uk'}/login
+Email: ${member.email}
+Password: ${member.pending_password}
+
+You can change your password anytime from Settings once you're logged in.
+
+Welcome aboard,
+The dynR team`,
+        })
+      } catch (mailErr) {
+        console.error('Failed to send payment-confirmation email:', mailErr)
+      }
+
+      db.prepare('UPDATE members SET pending_password = NULL WHERE id = ?').run(member.id)
+    }
+
+    return res.json({ ok: true, restaurantName: member.restaurant_name })
+  } catch (err) {
+    console.error('Failed to confirm payment:', err)
+    return res.status(500).json({ error: 'Failed to confirm payment. Please contact dynR.' })
   }
 })
 

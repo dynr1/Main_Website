@@ -45,6 +45,7 @@ addColumnIfMissing('members', 'stripe_customer_id', 'TEXT')
 addColumnIfMissing('members', 'stripe_subscription_id', 'TEXT')
 addColumnIfMissing('members', 'welcome_email_text', 'TEXT')
 addColumnIfMissing('members', 'followup_email_text', 'TEXT')
+addColumnIfMissing('members', 'pending_password', 'TEXT')
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS guests (

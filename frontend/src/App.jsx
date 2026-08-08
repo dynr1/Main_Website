@@ -17,6 +17,7 @@ import Settings from "./pages/Settings";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import GetStarted from "./pages/GetStarted";
+import AccountCreated from "./pages/AccountCreated";
 
 function SiteLayout({ children }) {
   return (
@@ -104,6 +105,14 @@ function App() {
         element={
           <SiteLayout>
             <GetStarted />
+          </SiteLayout>
+        }
+      />
+      <Route
+        path="/account-created"
+        element={
+          <SiteLayout>
+            <AccountCreated />
           </SiteLayout>
         }
       />

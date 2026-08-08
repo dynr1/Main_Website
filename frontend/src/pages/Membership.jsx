@@ -5,6 +5,7 @@ const initialForm = {
   restaurantName: "",
   email: "",
   phone: "",
+  password: "",
   smtpHost: "",
   smtpPort: "",
   smtpUser: "",
@@ -118,12 +119,14 @@ export default function Membership() {
         throw new Error(data?.error || "Something went wrong. Please try again.");
       }
 
-      setSuccess(true);
-      setForm(initialForm);
-      loadRestaurants();
+      if (!data.checkoutUrl) {
+        throw new Error("Account created, but no payment link came back. Please check billing setup.");
+      }
+
+      // Account is created — now hand off to Stripe to complete payment
+      window.location.href = data.checkoutUrl;
     } catch (err) {
       setError(err.message);
-    } finally {
       setLoading(false);
     }
   }
@@ -222,20 +225,6 @@ export default function Membership() {
 
         {error && <div className="form-error">{error}</div>}
 
-        {success && (
-          <div
-            className="form-error"
-            style={{
-              background: "#eaf7ec",
-              color: "#1e7a34",
-              borderColor: "#bfe6c8",
-            }}
-          >
-            Restaurant account created — an email with their password setup
-            link and payment link has been sent.
-          </div>
-        )}
-
         <form onSubmit={handleSubmit}>
           <div className="form-group">
             <label htmlFor="restaurantName">Restaurant Name</label>
@@ -272,6 +261,20 @@ export default function Membership() {
               placeholder="07123 456789"
               value={form.phone}
               onChange={handleChange}
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="password">Dashboard Password</label>
+            <input
+              id="password"
+              name="password"
+              type="password"
+              placeholder="At least 8 characters"
+              value={form.password}
+              onChange={handleChange}
+              required
+              minLength={8}
             />
           </div>
 
@@ -344,7 +347,7 @@ export default function Membership() {
           </div>
 
           <button type="submit" className="btn" disabled={loading}>
-            {loading ? "Sending…" : "Set Up Payment Method & Send Login"}
+            {loading ? "Redirecting to Stripe…" : "Set Up Payment Method"}
           </button>
         </form>
       </div>
