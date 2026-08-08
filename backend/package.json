@@ -4,8 +4,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "node --experimental-sqlite server.js",
-    "dev": "node --experimental-sqlite --watch server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -15,6 +15,7 @@
     "express-rate-limit": "^7.4.0",
     "jsonwebtoken": "^9.0.2",
     "nodemailer": "^6.9.14",
+    "pg": "^8.13.1",
     "stripe": "^17.4.0"
   }
 }

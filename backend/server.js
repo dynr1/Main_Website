@@ -7,7 +7,7 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
 import Stripe from 'stripe'
-import db from './db.js'
+import db, { initDb } from './db.js'
 
 dotenv.config()
 
@@ -38,7 +38,7 @@ app.use(cors())
 app.post(
   '/api/stripe-webhook',
   express.raw({ type: 'application/json' }),
-  (req, res) => {
+  async (req, res) => {
     if (!stripe || !process.env.STRIPE_WEBHOOK_SECRET) {
       console.error('Stripe webhook hit but Stripe is not configured.')
       return res.status(503).send('Stripe not configured')
@@ -63,7 +63,7 @@ app.post(
           const session = event.data.object
           const memberId = session.client_reference_id
           if (memberId) {
-            db.prepare(
+            await db.prepare(
               'UPDATE members SET payment_status = ?, stripe_customer_id = ?, stripe_subscription_id = ? WHERE id = ?'
             ).run('paid', session.customer, session.subscription, memberId)
           }
@@ -73,7 +73,7 @@ app.post(
         case 'invoice.paid': {
           const invoice = event.data.object
           if (invoice.customer) {
-            db.prepare('UPDATE members SET payment_status = ? WHERE stripe_customer_id = ?').run(
+            await db.prepare('UPDATE members SET payment_status = ? WHERE stripe_customer_id = ?').run(
               'paid',
               invoice.customer
             )
@@ -85,7 +85,7 @@ app.post(
         case 'customer.subscription.deleted': {
           const obj = event.data.object
           if (obj.customer) {
-            db.prepare('UPDATE members SET payment_status = ? WHERE stripe_customer_id = ?').run(
+            await db.prepare('UPDATE members SET payment_status = ? WHERE stripe_customer_id = ?').run(
               'unpaid',
               obj.customer
             )
@@ -354,7 +354,7 @@ app.post('/api/register', requireAdmin, async (req, res) => {
     return res.status(503).json({ error: 'Billing is not configured yet — set STRIPE_SECRET_KEY and STRIPE_PRICE_ID first.' })
   }
 
-  const existing = db.prepare('SELECT id FROM members WHERE email = ?').get(email)
+  const existing = await db.prepare('SELECT id FROM members WHERE email = ?').get(email)
   if (existing) {
     return res.status(409).json({ error: 'An account with this email already exists.' })
   }
@@ -366,7 +366,7 @@ app.post('/api/register', requireAdmin, async (req, res) => {
     // Keep the plaintext password briefly — it's needed to include in the
     // confirmation email once payment succeeds (bcrypt hashes can't be
     // reversed). Cleared immediately after that email is sent.
-    const result = db
+    const result = await db
       .prepare(
         `INSERT INTO members
           (restaurant_name, email, phone, password_hash, pending_password, is_paid, slug,
@@ -429,13 +429,13 @@ app.get('/api/confirm-payment', async (req, res) => {
     }
 
     const memberId = session.client_reference_id
-    const member = memberId ? db.prepare('SELECT * FROM members WHERE id = ?').get(memberId) : null
+    const member = memberId ? await db.prepare('SELECT * FROM members WHERE id = ?').get(memberId) : null
 
     if (!member) {
       return res.status(404).json({ error: 'Restaurant not found for this payment.' })
     }
 
-    db.prepare(
+    await db.prepare(
       'UPDATE members SET payment_status = ?, stripe_customer_id = ?, stripe_subscription_id = ? WHERE id = ?'
     ).run('paid', session.customer, session.subscription, member.id)
 
@@ -466,7 +466,7 @@ The dynR team`,
         console.error('Failed to send payment-confirmation email:', mailErr)
       }
 
-      db.prepare('UPDATE members SET pending_password = NULL WHERE id = ?').run(member.id)
+      await db.prepare('UPDATE members SET pending_password = NULL WHERE id = ?').run(member.id)
     }
 
     return res.json({ ok: true, restaurantName: member.restaurant_name })
@@ -481,8 +481,8 @@ The dynR team`,
 // live state — including payment_status, which only this endpoint (and the
 // one below it) can change. A restaurant editing their own email/password
 // via /api/login-protected routes never touches payment_status.
-app.get('/api/admin/restaurants', requireAdmin, (req, res) => {
-  const rows = db
+app.get('/api/admin/restaurants', requireAdmin, async (req, res) => {
+  const rows = await db
     .prepare(
       `SELECT id, restaurant_name, email, phone, payment_status, created_at,
               smtp_host, smtp_user, smtp_pass
@@ -505,51 +505,48 @@ app.get('/api/admin/restaurants', requireAdmin, (req, res) => {
 })
 
 // ---------- Admin: Set a restaurant's payment status ----------
-app.put('/api/admin/restaurants/:id/payment', requireAdmin, (req, res) => {
+app.put('/api/admin/restaurants/:id/payment', requireAdmin, async (req, res) => {
   const { paymentStatus } = req.body || {}
 
   if (!['paid', 'unpaid'].includes(paymentStatus)) {
     return res.status(400).json({ error: "paymentStatus must be 'paid' or 'unpaid'." })
   }
 
-  const existing = db.prepare('SELECT id FROM members WHERE id = ?').get(req.params.id)
+  const existing = await db.prepare('SELECT id FROM members WHERE id = ?').get(req.params.id)
   if (!existing) {
     return res.status(404).json({ error: 'Restaurant not found.' })
   }
 
-  db.prepare('UPDATE members SET payment_status = ? WHERE id = ?').run(paymentStatus, req.params.id)
+  await db.prepare('UPDATE members SET payment_status = ? WHERE id = ?').run(paymentStatus, req.params.id)
 
   return res.json({ ok: true })
 })
 
 // ---------- Admin: Delete a restaurant (and all their data) ----------
-// Cascades manually since node:sqlite doesn't enforce ON DELETE CASCADE
-// by default — deletes guest_notes and visits for their guests, then
+// Cascades manually — deletes guest_notes and visits for their guests, then
 // scheduled_emails, then the guests themselves, then the member. Order
 // matters here because of the foreign key references.
-app.delete('/api/admin/restaurants/:id', requireAdmin, (req, res) => {
+app.delete('/api/admin/restaurants/:id', requireAdmin, async (req, res) => {
   const restaurantId = req.params.id
 
-  const existing = db.prepare('SELECT id, restaurant_name FROM members WHERE id = ?').get(restaurantId)
+  const existing = await db.prepare('SELECT id, restaurant_name FROM members WHERE id = ?').get(restaurantId)
   if (!existing) {
     return res.status(404).json({ error: 'Restaurant not found.' })
   }
 
   try {
-    const guestIds = db
-      .prepare('SELECT id FROM guests WHERE restaurant_id = ?')
-      .all(restaurantId)
-      .map((g) => g.id)
+    const guestRows = await db.prepare('SELECT id FROM guests WHERE restaurant_id = ?').all(restaurantId)
+    const guestIds = guestRows.map((g) => g.id)
 
     for (const guestId of guestIds) {
-      db.prepare('DELETE FROM guest_notes WHERE guest_id = ?').run(guestId)
-      db.prepare('DELETE FROM visits WHERE guest_id = ?').run(guestId)
+      await db.prepare('DELETE FROM guest_notes WHERE guest_id = ?').run(guestId)
+      await db.prepare('DELETE FROM visits WHERE guest_id = ?').run(guestId)
     }
 
-    db.prepare('DELETE FROM scheduled_emails WHERE restaurant_id = ?').run(restaurantId)
-    db.prepare('DELETE FROM guests WHERE restaurant_id = ?').run(restaurantId)
-    db.prepare('DELETE FROM password_resets WHERE member_id = ?').run(restaurantId)
-    db.prepare('DELETE FROM members WHERE id = ?').run(restaurantId)
+    await db.prepare('DELETE FROM scheduled_emails WHERE restaurant_id = ?').run(restaurantId)
+    await db.prepare('DELETE FROM guests WHERE restaurant_id = ?').run(restaurantId)
+    await db.prepare('DELETE FROM password_resets WHERE member_id = ?').run(restaurantId)
+    await db.prepare('DELETE FROM members WHERE id = ?').run(restaurantId)
 
     return res.json({ ok: true, deleted: existing.restaurant_name })
   } catch (err) {
@@ -566,7 +563,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Email and password are required.' })
   }
 
-  const member = db.prepare('SELECT * FROM members WHERE email = ?').get(email)
+  const member = await db.prepare('SELECT * FROM members WHERE email = ?').get(email)
   if (!member) {
     return res.status(401).json({ error: 'Invalid email or password.' })
   }
@@ -596,7 +593,7 @@ app.post('/api/forgot-password', forgotPasswordLimiter, async (req, res) => {
     message: 'If an account exists for that email, a reset link has been sent.',
   }
 
-  const member = db.prepare('SELECT * FROM members WHERE email = ?').get(email)
+  const member = await db.prepare('SELECT * FROM members WHERE email = ?').get(email)
   if (!member) {
     return res.json(genericResponse)
   }
@@ -604,7 +601,7 @@ app.post('/api/forgot-password', forgotPasswordLimiter, async (req, res) => {
   const token = crypto.randomBytes(32).toString('hex')
   const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString() // 1 hour
 
-  db.prepare(
+  await db.prepare(
     'INSERT INTO password_resets (member_id, token, expires_at) VALUES (?, ?, ?)'
   ).run(member.id, token, expiresAt)
 
@@ -645,7 +642,7 @@ app.post('/api/reset-password', async (req, res) => {
     return res.status(400).json({ error: 'Password must be at least 8 characters.' })
   }
 
-  const resetRow = db.prepare('SELECT * FROM password_resets WHERE token = ?').get(token)
+  const resetRow = await db.prepare('SELECT * FROM password_resets WHERE token = ?').get(token)
 
   if (!resetRow || resetRow.used || new Date(resetRow.expires_at) < new Date()) {
     return res.status(400).json({ error: 'This reset link is invalid or has expired. Please request a new one.' })
@@ -653,15 +650,15 @@ app.post('/api/reset-password', async (req, res) => {
 
   const passwordHash = await bcrypt.hash(newPassword, 10)
 
-  db.prepare('UPDATE members SET password_hash = ? WHERE id = ?').run(passwordHash, resetRow.member_id)
-  db.prepare('UPDATE password_resets SET used = 1 WHERE id = ?').run(resetRow.id)
+  await db.prepare('UPDATE members SET password_hash = ? WHERE id = ?').run(passwordHash, resetRow.member_id)
+  await db.prepare('UPDATE password_resets SET used = 1 WHERE id = ?').run(resetRow.id)
 
   return res.json({ ok: true })
 })
 
 // ---------- Membership: Current member info (for dashboard) ----------
-app.get('/api/member/me', requireAuth, (req, res) => {
-  const member = db
+app.get('/api/member/me', requireAuth, async (req, res) => {
+  const member = await db
     .prepare('SELECT id, restaurant_name, email, phone, slug, created_at FROM members WHERE id = ?')
     .get(req.memberId)
 
@@ -673,8 +670,8 @@ app.get('/api/member/me', requireAuth, (req, res) => {
 })
 
 // ---------- Public: Get restaurant name by slug (for guest sign-up page) ----------
-app.get('/api/public/restaurant/:slug', (req, res) => {
-  const restaurant = db
+app.get('/api/public/restaurant/:slug', async (req, res) => {
+  const restaurant = await db
     .prepare('SELECT id, restaurant_name, google_review_url FROM members WHERE slug = ?')
     .get(req.params.slug)
 
@@ -700,22 +697,22 @@ app.post('/api/public/guests', async (req, res) => {
     return res.status(400).json({ error: 'Please enter a valid email address.' })
   }
 
-  const restaurant = db.prepare('SELECT * FROM members WHERE slug = ?').get(slug)
+  const restaurant = await db.prepare('SELECT * FROM members WHERE slug = ?').get(slug)
   if (!restaurant) {
     return res.status(404).json({ error: 'Restaurant not found.' })
   }
 
   try {
-    const countRow = db
+    const countRow = await db
       .prepare('SELECT COUNT(*) as count FROM guests WHERE restaurant_id = ?')
       .get(restaurant.id)
 
     const membershipNumber = generateMembershipNumber(
       restaurant.restaurant_name,
-      countRow.count + 1
+      Number(countRow.count) + 1
     )
 
-    db.prepare(
+    await db.prepare(
       `INSERT INTO guests (restaurant_id, name, email, phone, birthday_day, birthday_month, membership_number)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(restaurant.id, name, email, phone, birthdayDay, birthdayMonth, membershipNumber)
@@ -771,8 +768,8 @@ The ${restaurant.restaurant_name} team`
 })
 
 // ---------- Guests: list all guests for the logged-in restaurant ----------
-app.get('/api/guests', requireAuth, (req, res) => {
-  const guests = db
+app.get('/api/guests', requireAuth, async (req, res) => {
+  const guests = await db
     .prepare(
       `SELECT
         g.id,
@@ -794,8 +791,8 @@ app.get('/api/guests', requireAuth, (req, res) => {
 })
 
 // ---------- Guests: mark a visit ----------
-app.post('/api/guests/:id/visit', requireAuth, (req, res) => {
-  const guest = db
+app.post('/api/guests/:id/visit', requireAuth, async (req, res) => {
+  const guest = await db
     .prepare('SELECT id FROM guests WHERE id = ? AND restaurant_id = ?')
     .get(req.params.id, req.memberId)
 
@@ -803,24 +800,23 @@ app.post('/api/guests/:id/visit', requireAuth, (req, res) => {
     return res.status(404).json({ error: 'Guest not found.' })
   }
 
-  db.prepare('INSERT INTO visits (guest_id) VALUES (?)').run(guest.id)
+  await db.prepare('INSERT INTO visits (guest_id) VALUES (?)').run(guest.id)
 
   // Queue a "thanks for visiting" follow-up email for 1 hour from now.
   // A background poller (see below) picks this up and sends it — using a
   // DB row instead of setTimeout means it still gets sent even if the
   // server restarts or redeploys in the meantime.
   const sendAt = new Date(Date.now() + 60 * 60 * 1000).toISOString()
-  db.prepare(
+  await db.prepare(
     'INSERT INTO scheduled_emails (guest_id, restaurant_id, send_at, status) VALUES (?, ?, ?, ?)'
   ).run(guest.id, req.memberId, sendAt, 'pending')
 
   return res.json({ ok: true })
 })
 
-// ---------- Guests: add a note ----------
 // ---------- Guests: list all notes for a guest ----------
-app.get('/api/guests/:id/notes', requireAuth, (req, res) => {
-  const guest = db
+app.get('/api/guests/:id/notes', requireAuth, async (req, res) => {
+  const guest = await db
     .prepare('SELECT id FROM guests WHERE id = ? AND restaurant_id = ?')
     .get(req.params.id, req.memberId)
 
@@ -828,21 +824,22 @@ app.get('/api/guests/:id/notes', requireAuth, (req, res) => {
     return res.status(404).json({ error: 'Guest not found.' })
   }
 
-  const notes = db
+  const notes = await db
     .prepare('SELECT id, note_text, created_at FROM guest_notes WHERE guest_id = ? ORDER BY created_at DESC')
     .all(guest.id)
 
   return res.json({ notes })
 })
 
-app.post('/api/guests/:id/notes', requireAuth, (req, res) => {
+// ---------- Guests: add a note ----------
+app.post('/api/guests/:id/notes', requireAuth, async (req, res) => {
   const { noteText } = req.body || {}
 
   if (!noteText || !noteText.trim()) {
     return res.status(400).json({ error: 'Note text is required.' })
   }
 
-  const guest = db
+  const guest = await db
     .prepare('SELECT id FROM guests WHERE id = ? AND restaurant_id = ?')
     .get(req.params.id, req.memberId)
 
@@ -850,7 +847,7 @@ app.post('/api/guests/:id/notes', requireAuth, (req, res) => {
     return res.status(404).json({ error: 'Guest not found.' })
   }
 
-  const result = db
+  const result = await db
     .prepare('INSERT INTO guest_notes (guest_id, note_text) VALUES (?, ?)')
     .run(guest.id, noteText.trim())
 
@@ -860,14 +857,14 @@ app.post('/api/guests/:id/notes', requireAuth, (req, res) => {
 // ---------- Guests: edit an existing note ----------
 // Previous notes are never overwritten by this — only the one note whose id
 // is in the URL changes. The full history stays intact and visible.
-app.put('/api/guests/:guestId/notes/:noteId', requireAuth, (req, res) => {
+app.put('/api/guests/:guestId/notes/:noteId', requireAuth, async (req, res) => {
   const { noteText } = req.body || {}
 
   if (!noteText || !noteText.trim()) {
     return res.status(400).json({ error: 'Note text is required.' })
   }
 
-  const guest = db
+  const guest = await db
     .prepare('SELECT id FROM guests WHERE id = ? AND restaurant_id = ?')
     .get(req.params.guestId, req.memberId)
 
@@ -875,7 +872,7 @@ app.put('/api/guests/:guestId/notes/:noteId', requireAuth, (req, res) => {
     return res.status(404).json({ error: 'Guest not found.' })
   }
 
-  const note = db
+  const note = await db
     .prepare('SELECT id FROM guest_notes WHERE id = ? AND guest_id = ?')
     .get(req.params.noteId, guest.id)
 
@@ -883,7 +880,7 @@ app.put('/api/guests/:guestId/notes/:noteId', requireAuth, (req, res) => {
     return res.status(404).json({ error: 'Note not found.' })
   }
 
-  db.prepare('UPDATE guest_notes SET note_text = ? WHERE id = ?').run(noteText.trim(), note.id)
+  await db.prepare('UPDATE guest_notes SET note_text = ? WHERE id = ?').run(noteText.trim(), note.id)
 
   return res.json({ ok: true })
 })
@@ -896,7 +893,7 @@ app.post('/api/guests/message', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Guest IDs and a message are required.' })
   }
 
-  const restaurant = db.prepare('SELECT * FROM members WHERE id = ?').get(req.memberId)
+  const restaurant = await db.prepare('SELECT * FROM members WHERE id = ?').get(req.memberId)
 
   if (!restaurant.smtp_host || !restaurant.smtp_user || !restaurant.smtp_pass) {
     return res.status(400).json({
@@ -905,7 +902,7 @@ app.post('/api/guests/message', requireAuth, async (req, res) => {
   }
 
   const placeholders = guestIds.map(() => '?').join(',')
-  const guests = db
+  const guests = await db
     .prepare(
       `SELECT id, name, email FROM guests WHERE restaurant_id = ? AND id IN (${placeholders})`
     )
@@ -943,9 +940,10 @@ app.post('/api/guests/message', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'Failed to send message. Please check your email settings.' })
   }
 })
+
 // ---------- Settings: Get current restaurant settings ----------
-app.get('/api/settings', requireAuth, (req, res) => {
-  const member = db
+app.get('/api/settings', requireAuth, async (req, res) => {
+  const member = await db
     .prepare(
       `SELECT smtp_host, smtp_port, smtp_user, smtp_pass, google_review_url,
               welcome_email_text, followup_email_text, payment_status
@@ -966,7 +964,7 @@ app.get('/api/settings', requireAuth, (req, res) => {
 })
 
 // ---------- Settings: Update SMTP + Google review link + email templates ----------
-app.put('/api/settings', requireAuth, (req, res) => {
+app.put('/api/settings', requireAuth, async (req, res) => {
   const { smtpHost, smtpPort, smtpUser, smtpPass, googleReviewUrl, welcomeEmailText, followupEmailText } =
     req.body || {}
 
@@ -975,7 +973,7 @@ app.put('/api/settings', requireAuth, (req, res) => {
     // instead of wiping it out — the frontend never receives the real
     // value, so an empty field here doesn't mean "clear the password."
     if (smtpPass && smtpPass.trim()) {
-      db.prepare(
+      await db.prepare(
         `UPDATE members
          SET smtp_host = ?, smtp_port = ?, smtp_user = ?, smtp_pass = ?, google_review_url = ?,
              welcome_email_text = ?, followup_email_text = ?
@@ -991,7 +989,7 @@ app.put('/api/settings', requireAuth, (req, res) => {
         req.memberId
       )
     } else {
-      db.prepare(
+      await db.prepare(
         `UPDATE members
          SET smtp_host = ?, smtp_port = ?, smtp_user = ?, google_review_url = ?,
              welcome_email_text = ?, followup_email_text = ?
@@ -1026,7 +1024,7 @@ app.put('/api/change-password', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'New password must be at least 8 characters.' })
   }
 
-  const member = db.prepare('SELECT * FROM members WHERE id = ?').get(req.memberId)
+  const member = await db.prepare('SELECT * FROM members WHERE id = ?').get(req.memberId)
   if (!member) {
     return res.status(404).json({ error: 'Restaurant not found.' })
   }
@@ -1037,7 +1035,7 @@ app.put('/api/change-password', requireAuth, async (req, res) => {
   }
 
   const newHash = await bcrypt.hash(newPassword, 10)
-  db.prepare('UPDATE members SET password_hash = ? WHERE id = ?').run(newHash, req.memberId)
+  await db.prepare('UPDATE members SET password_hash = ? WHERE id = ?').run(newHash, req.memberId)
 
   return res.json({ ok: true })
 })
@@ -1047,7 +1045,7 @@ async function sendDueScheduledEmails() {
   let due
   try {
     const nowIso = new Date().toISOString()
-    due = db
+    due = await db
       .prepare(
         `SELECT se.id as scheduled_id, g.id as guest_id, g.name, g.email,
                 m.restaurant_name, m.smtp_host, m.smtp_port, m.smtp_user, m.smtp_pass,
@@ -1067,7 +1065,7 @@ async function sendDueScheduledEmails() {
     // No email on file, or restaurant hasn't set up their SMTP yet — skip, don't retry forever.
     if (!row.email || !row.smtp_host || !row.smtp_user || !row.smtp_pass) {
       try {
-        db.prepare('UPDATE scheduled_emails SET status = ? WHERE id = ?').run('skipped', row.scheduled_id)
+        await db.prepare('UPDATE scheduled_emails SET status = ? WHERE id = ?').run('skipped', row.scheduled_id)
       } catch (err) {
         console.error(`Failed to mark scheduled_emails id ${row.scheduled_id} as skipped:`, err)
       }
@@ -1104,18 +1102,33 @@ async function sendDueScheduledEmails() {
         text: followupText,
       })
 
-      db.prepare('UPDATE scheduled_emails SET status = ? WHERE id = ?').run('sent', row.scheduled_id)
+      await db.prepare('UPDATE scheduled_emails SET status = ? WHERE id = ?').run('sent', row.scheduled_id)
     } catch (err) {
       console.error(`Failed to send visit follow-up email (scheduled_emails id ${row.scheduled_id}):`, err)
-      db.prepare('UPDATE scheduled_emails SET status = ? WHERE id = ?').run('failed', row.scheduled_id)
+      await db.prepare('UPDATE scheduled_emails SET status = ? WHERE id = ?').run('failed', row.scheduled_id)
     }
   }
 }
 
-// Check every minute. Good enough for a "within the hour" follow-up without hammering SMTP.
-setInterval(sendDueScheduledEmails, 60 * 1000)
+// ---------- Startup ----------
+// Postgres init is async, so the whole startup sequence waits for tables
+// to be ready before accepting traffic or running the email poller.
+async function start() {
+  try {
+    await initDb()
+    console.log('Database ready.')
+  } catch (err) {
+    console.error('Failed to initialize database — exiting:', err)
+    process.exit(1)
+  }
 
-app.listen(PORT, () => {
-  console.log(`dynR backend listening on http://localhost:${PORT}`)
-  sendDueScheduledEmails() // catch anything that was due while the server was down
-})
+  // Check every minute. Good enough for a "within the hour" follow-up without hammering SMTP.
+  setInterval(sendDueScheduledEmails, 60 * 1000)
+
+  app.listen(PORT, () => {
+    console.log(`dynR backend listening on http://localhost:${PORT}`)
+    sendDueScheduledEmails() // catch anything that was due while the server was down
+  })
+}
+
+start()
