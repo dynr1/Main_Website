@@ -963,6 +963,35 @@ app.put('/api/settings', requireAuth, (req, res) => {
     return res.status(500).json({ error: 'Failed to save settings. Please try again.' })
   }
 })
+
+// ---------- Change password (for a restaurant already logged in) ----------
+app.put('/api/change-password', requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {}
+
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ error: 'Current password and new password are required.' })
+  }
+
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: 'New password must be at least 8 characters.' })
+  }
+
+  const member = db.prepare('SELECT * FROM members WHERE id = ?').get(req.memberId)
+  if (!member) {
+    return res.status(404).json({ error: 'Restaurant not found.' })
+  }
+
+  const isMatch = await bcrypt.compare(currentPassword, member.password_hash)
+  if (!isMatch) {
+    return res.status(401).json({ error: 'Current password is incorrect.' })
+  }
+
+  const newHash = await bcrypt.hash(newPassword, 10)
+  db.prepare('UPDATE members SET password_hash = ? WHERE id = ?').run(newHash, req.memberId)
+
+  return res.json({ ok: true })
+})
+
 // ---------- Background poller: send due "thanks for visiting" emails ----------
 async function sendDueScheduledEmails() {
   let due

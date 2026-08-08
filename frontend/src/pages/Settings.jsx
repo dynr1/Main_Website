@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { API_URL } from "../api";
 
 export default function Settings() {
-  const [section, setSection] = useState("setup"); // "setup" | "messages"
+  const [section, setSection] = useState("setup"); // "setup" | "messages" | "password"
 
   const [form, setForm] = useState({
     smtpHost: "",
@@ -18,6 +18,11 @@ export default function Settings() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
+
+  const [pwForm, setPwForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
+  const [pwError, setPwError] = useState("");
+  const [pwSuccess, setPwSuccess] = useState(false);
+  const [pwSaving, setPwSaving] = useState(false);
 
   const token = sessionStorage.getItem("dynr_token");
 
@@ -89,6 +94,44 @@ export default function Settings() {
     }
   }
 
+  async function handleChangePassword(e) {
+    e.preventDefault();
+    setPwError("");
+    setPwSuccess(false);
+
+    if (pwForm.newPassword !== pwForm.confirmPassword) {
+      setPwError("New passwords don't match.");
+      return;
+    }
+
+    setPwSaving(true);
+    try {
+      const res = await fetch(`${API_URL}/api/change-password`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          currentPassword: pwForm.currentPassword,
+          newPassword: pwForm.newPassword,
+        }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.error || "Failed to change password.");
+      }
+
+      setPwSuccess(true);
+      setPwForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+    } catch (err) {
+      setPwError(err.message);
+    } finally {
+      setPwSaving(false);
+    }
+  }
+
   if (loading) return null;
 
   return (
@@ -115,6 +158,7 @@ export default function Settings() {
             >
               <option value="setup">Set Up</option>
               <option value="messages">Edit Messages</option>
+              <option value="password">Change Password</option>
             </select>
           </div>
 
@@ -248,6 +292,66 @@ export default function Settings() {
 
                 <button type="submit" className="btn" disabled={saving}>
                   {saving ? "Saving…" : "Save Messages"}
+                </button>
+              </form>
+            </>
+          )}
+
+          {section === "password" && (
+            <>
+              <p className="dash-subtitle" style={{ marginBottom: 24 }}>
+                Change your dashboard login password.
+              </p>
+
+              {pwError && <div className="form-error">{pwError}</div>}
+              {pwSuccess && (
+                <div
+                  className="form-error"
+                  style={{ background: "#eaf7ec", color: "#1e7a34", borderColor: "#bfe6c8" }}
+                >
+                  Password updated.
+                </div>
+              )}
+
+              <form onSubmit={handleChangePassword}>
+                <div className="form-group">
+                  <label htmlFor="currentPassword">Current Password</label>
+                  <input
+                    id="currentPassword"
+                    type="password"
+                    value={pwForm.currentPassword}
+                    onChange={(e) => setPwForm((f) => ({ ...f, currentPassword: e.target.value }))}
+                    required
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="newPassword">New Password</label>
+                  <input
+                    id="newPassword"
+                    type="password"
+                    placeholder="At least 8 characters"
+                    value={pwForm.newPassword}
+                    onChange={(e) => setPwForm((f) => ({ ...f, newPassword: e.target.value }))}
+                    required
+                    minLength={8}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="confirmPassword">Confirm New Password</label>
+                  <input
+                    id="confirmPassword"
+                    type="password"
+                    value={pwForm.confirmPassword}
+                    onChange={(e) => setPwForm((f) => ({ ...f, confirmPassword: e.target.value }))}
+                    required
+                    minLength={8}
+                  />
+                </div>
+
+                <button type="submit" className="btn" disabled={pwSaving}>
+                  {pwSaving ? "Saving…" : "Change Password"}
                 </button>
               </form>
             </>
