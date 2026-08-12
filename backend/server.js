@@ -7,6 +7,7 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
 import Stripe from 'stripe'
+import { Resend } from 'resend'
 import db, { initDb } from './db.js'
 
 dotenv.config()
@@ -142,16 +143,33 @@ const forgotPasswordLimiter = rateLimit({
   message: { error: 'Too many reset requests. Please try again later.' },
 })
 
-// Mail transport — configure via .env (see .env.example)
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT) || 587,
-  secure: process.env.SMTP_SECURE === 'true',
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
+// Admin-side transactional email (contact form, membership inquiries,
+// forgot-password, payment confirmation) — sent via Resend's HTTPS API
+// instead of raw SMTP. Render blocks/times out outbound SMTP connections
+// to Gmail from its servers, but a normal HTTPS API call works fine.
+//
+// Restaurants' own guest-facing emails (welcome emails, visit follow-ups,
+// custom messages) are NOT affected by this — those still go through each
+// restaurant's own SMTP settings via restaurantTransporter, unchanged.
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
+
+const transporter = {
+  async sendMail({ from, to, subject, text, replyTo }) {
+    if (!resend) {
+      throw new Error('RESEND_API_KEY is not set — admin email is not configured yet.')
+    }
+    const { error } = await resend.emails.send({
+      from: from || process.env.MAIL_FROM || 'dynR <no-reply@dynr.co.uk>',
+      to,
+      subject,
+      text,
+      replyTo,
+    })
+    if (error) {
+      throw new Error(error.message || 'Failed to send email via Resend.')
+    }
   },
-})
+}
 
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
