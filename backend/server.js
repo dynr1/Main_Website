@@ -148,9 +148,13 @@ const forgotPasswordLimiter = rateLimit({
 // instead of raw SMTP. Render blocks/times out outbound SMTP connections
 // to Gmail from its servers, but a normal HTTPS API call works fine.
 //
-// Restaurants' own guest-facing emails (welcome emails, visit follow-ups,
-// custom messages) are NOT affected by this — those still go through each
-// restaurant's own SMTP settings via restaurantTransporter, unchanged.
+// Admin-side transactional email only (contact form, membership inquiries,
+// forgot-password, payment confirmation) — sent via Resend's HTTPS API.
+// Guest-facing emails (welcome, follow-up, custom messages) go through
+// each restaurant's own SMTP instead (see restaurantTransporter below) —
+// note this depends on the restaurant's SMTP provider actually accepting
+// connections from Render's servers; Gmail specifically has been known to
+// time out here.
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
 
 const transporter = {
