@@ -175,7 +175,9 @@ export default function Settings() {
           {section === "setup" && (
             <>
               <p className="dash-subtitle" style={{ marginBottom: 24 }}>
-                Connect your own email so messages send from your restaurant, not dynR.
+                Guest emails now send automatically via dynR — no setup
+                required. The email address below just controls where
+                replies from guests land, if you'd like a specific inbox.
               </p>
 
               <form onSubmit={handleSubmit}>

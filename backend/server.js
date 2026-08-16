@@ -2,7 +2,6 @@ import express from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
 import rateLimit from 'express-rate-limit'
-import nodemailer from 'nodemailer'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
@@ -148,13 +147,14 @@ const forgotPasswordLimiter = rateLimit({
 // instead of raw SMTP. Render blocks/times out outbound SMTP connections
 // to Gmail from its servers, but a normal HTTPS API call works fine.
 //
-// Admin-side transactional email only (contact form, membership inquiries,
-// forgot-password, payment confirmation) — sent via Resend's HTTPS API.
-// Guest-facing emails (welcome, follow-up, custom messages) go through
-// each restaurant's own SMTP instead (see restaurantTransporter below) —
-// note this depends on the restaurant's SMTP provider actually accepting
-// connections from Render's servers; Gmail specifically has been known to
-// time out here.
+// Admin-side transactional email (contact form, membership inquiries,
+// forgot-password, payment confirmation) AND guest-facing emails (welcome,
+// follow-up, custom messages) all send via Resend's HTTPS API — not raw
+// SMTP. Render blocks/times out outbound SMTP to Gmail from its servers,
+// confirmed in testing for both the admin's own account and restaurant
+// accounts, so this avoids depending on each restaurant's SMTP working.
+// Guest emails send as "{Restaurant Name} <no-reply@dynr.co.uk>" with the
+// restaurant's own email set as reply-to, so replies reach them normally.
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
 
 const transporter = {
@@ -739,21 +739,11 @@ app.post('/api/public/guests', async (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(restaurant.id, name, email, phone, birthdayDay, birthdayMonth, membershipNumber)
 
-    // Send welcome email using the restaurant's own SMTP if they've set it up.
-    // If not configured yet, skip silently — guest is still created either way.
-    if (restaurant.smtp_host && restaurant.smtp_user && restaurant.smtp_pass) {
-      try {
-        const restaurantTransporter = nodemailer.createTransport({
-          host: restaurant.smtp_host,
-          port: Number(restaurant.smtp_port) || 587,
-          secure: false,
-          auth: {
-            user: restaurant.smtp_user,
-            pass: restaurant.smtp_pass,
-          },
-        })
-
-        const defaultWelcomeText = `Welcome to the family, ${name.split(' ')[0]}!
+    // Send welcome email via dynR's own Resend account, on the restaurant's
+    // behalf — "from" shows their name, "reply-to" is their real email, so
+    // replying reaches them normally. No SMTP setup required on their end.
+    try {
+      const defaultWelcomeText = `Welcome to the family, ${name.split(' ')[0]}!
 
 Thank you for becoming part of the ${restaurant.restaurant_name} family — we're so glad to have you. Keep an eye on your inbox for exciting member-only offers and news, just for members like you.
 
@@ -762,24 +752,24 @@ Your membership number: ${membershipNumber}
 Warmly,
 The ${restaurant.restaurant_name} team`
 
-        const welcomeText = restaurant.welcome_email_text
-          ? fillTemplate(restaurant.welcome_email_text, {
-              first_name: name.split(' ')[0],
-              name,
-              restaurant_name: restaurant.restaurant_name,
-              membership_number: membershipNumber,
-            })
-          : defaultWelcomeText
+      const welcomeText = restaurant.welcome_email_text
+        ? fillTemplate(restaurant.welcome_email_text, {
+            first_name: name.split(' ')[0],
+            name,
+            restaurant_name: restaurant.restaurant_name,
+            membership_number: membershipNumber,
+          })
+        : defaultWelcomeText
 
-        await restaurantTransporter.sendMail({
-          from: restaurant.smtp_user,
-          to: email,
-          subject: `You're one of ours now, ${name.split(' ')[0]}`,
-          text: welcomeText,
-        })
-      } catch (mailErr) {
-        console.error('Failed to send guest welcome email:', mailErr)
-      }
+      await transporter.sendMail({
+        from: `"${restaurant.restaurant_name}" <${process.env.MAIL_FROM_ADDRESS || 'no-reply@dynr.co.uk'}>`,
+        to: email,
+        replyTo: restaurant.smtp_user || restaurant.email,
+        subject: `You're one of ours now, ${name.split(' ')[0]}`,
+        text: welcomeText,
+      })
+    } catch (mailErr) {
+      console.error('Failed to send guest welcome email:', mailErr)
     }
 
     return res.status(201).json({ ok: true, membershipNumber })
@@ -917,12 +907,6 @@ app.post('/api/guests/message', requireAuth, async (req, res) => {
 
   const restaurant = await db.prepare('SELECT * FROM members WHERE id = ?').get(req.memberId)
 
-  if (!restaurant.smtp_host || !restaurant.smtp_user || !restaurant.smtp_pass) {
-    return res.status(400).json({
-      error: 'Please set up your email in Settings before sending messages.',
-    })
-  }
-
   const placeholders = guestIds.map(() => '?').join(',')
   const guests = await db
     .prepare(
@@ -935,31 +919,24 @@ app.post('/api/guests/message', requireAuth, async (req, res) => {
   }
 
   try {
-    const restaurantTransporter = nodemailer.createTransport({
-      host: restaurant.smtp_host,
-      port: Number(restaurant.smtp_port) || 587,
-      secure: false,
-      auth: {
-        user: restaurant.smtp_user,
-        pass: restaurant.smtp_pass,
-      },
-    })
-
+    let sentCount = 0
     for (const guest of guests) {
       if (!guest.email) continue
 
-      await restaurantTransporter.sendMail({
-        from: restaurant.smtp_user,
+      await transporter.sendMail({
+        from: `"${restaurant.restaurant_name}" <${process.env.MAIL_FROM_ADDRESS || 'no-reply@dynr.co.uk'}>`,
         to: guest.email,
+        replyTo: restaurant.smtp_user || restaurant.email,
         subject: `A message from ${restaurant.restaurant_name}`,
         text: `Hi ${guest.name.split(' ')[0]},\n\n${message}\n\nWarmly,\n${restaurant.restaurant_name}`,
       })
+      sentCount++
     }
 
-    return res.json({ ok: true, sent: guests.length })
+    return res.json({ ok: true, sent: sentCount })
   } catch (err) {
     console.error('Failed to send guest message:', err)
-    return res.status(500).json({ error: 'Failed to send message. Please check your email settings.' })
+    return res.status(500).json({ error: 'Failed to send message. Please try again.' })
   }
 })
 
@@ -1070,7 +1047,7 @@ async function sendDueScheduledEmails() {
     due = await db
       .prepare(
         `SELECT se.id as scheduled_id, g.id as guest_id, g.name, g.email,
-                m.restaurant_name, m.smtp_host, m.smtp_port, m.smtp_user, m.smtp_pass,
+                m.restaurant_name, m.email as restaurant_email, m.smtp_user,
                 m.google_review_url, m.followup_email_text
          FROM scheduled_emails se
          JOIN guests g ON g.id = se.guest_id
@@ -1084,8 +1061,8 @@ async function sendDueScheduledEmails() {
   }
 
   for (const row of due) {
-    // No email on file, or restaurant hasn't set up their SMTP yet — skip, don't retry forever.
-    if (!row.email || !row.smtp_host || !row.smtp_user || !row.smtp_pass) {
+    // No email on file for the guest — skip, don't retry forever.
+    if (!row.email) {
       try {
         await db.prepare('UPDATE scheduled_emails SET status = ? WHERE id = ?').run('skipped', row.scheduled_id)
       } catch (err) {
@@ -1095,13 +1072,6 @@ async function sendDueScheduledEmails() {
     }
 
     try {
-      const restaurantTransporter = nodemailer.createTransport({
-        host: row.smtp_host,
-        port: Number(row.smtp_port) || 587,
-        secure: false,
-        auth: { user: row.smtp_user, pass: row.smtp_pass },
-      })
-
       const reviewLine = row.google_review_url
         ? `\n\nIf you enjoyed your visit, we'd love a quick review here: ${row.google_review_url}`
         : ''
@@ -1117,9 +1087,10 @@ async function sendDueScheduledEmails() {
           })
         : defaultFollowupText
 
-      await restaurantTransporter.sendMail({
-        from: row.smtp_user,
+      await transporter.sendMail({
+        from: `"${row.restaurant_name}" <${process.env.MAIL_FROM_ADDRESS || 'no-reply@dynr.co.uk'}>`,
         to: row.email,
+        replyTo: row.smtp_user || row.restaurant_email || undefined,
         subject: `Thanks for visiting ${row.restaurant_name}!`,
         text: followupText,
       })
