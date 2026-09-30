@@ -2,20 +2,13 @@ import express from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
 import rateLimit from 'express-rate-limit'
+import nodemailer from 'nodemailer'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
-import Stripe from 'stripe'
-import { Resend } from 'resend'
-import db, { initDb } from './db.js'
+import db from './db.js'
 
 dotenv.config()
-
-// Stripe is optional until real keys are set — the app still runs fine
-// without billing configured, it just can't create checkout sessions yet.
-const stripe = process.env.STRIPE_SECRET_KEY
-  ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2025-03-31.basil' })
-  : null
 
 // Safety net: log and keep running instead of the whole server dying on an
 // unexpected error somewhere. This is what let /api/register and
@@ -31,78 +24,6 @@ const app = express()
 const PORT = process.env.PORT || 4000
 
 app.use(cors())
-
-// ---------- Stripe webhook ----------
-// Must be registered BEFORE express.json() — Stripe's signature check needs
-// the raw, unparsed request body, not the JSON-parsed object.
-app.post(
-  '/api/stripe-webhook',
-  express.raw({ type: 'application/json' }),
-  async (req, res) => {
-    if (!stripe || !process.env.STRIPE_WEBHOOK_SECRET) {
-      console.error('Stripe webhook hit but Stripe is not configured.')
-      return res.status(503).send('Stripe not configured')
-    }
-
-    let event
-    try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        req.headers['stripe-signature'],
-        process.env.STRIPE_WEBHOOK_SECRET
-      )
-    } catch (err) {
-      console.error('Stripe webhook signature verification failed:', err.message)
-      return res.status(400).send(`Webhook Error: ${err.message}`)
-    }
-
-    try {
-      switch (event.type) {
-        // Subscription started successfully via Checkout.
-        case 'checkout.session.completed': {
-          const session = event.data.object
-          const memberId = session.client_reference_id
-          if (memberId) {
-            await db.prepare(
-              'UPDATE members SET payment_status = ?, stripe_customer_id = ?, stripe_subscription_id = ? WHERE id = ?'
-            ).run('paid', session.customer, session.subscription, memberId)
-          }
-          break
-        }
-        // Each successful renewal payment — keep them marked paid.
-        case 'invoice.paid': {
-          const invoice = event.data.object
-          if (invoice.customer) {
-            await db.prepare('UPDATE members SET payment_status = ? WHERE stripe_customer_id = ?').run(
-              'paid',
-              invoice.customer
-            )
-          }
-          break
-        }
-        // A renewal payment failed or the subscription was cancelled — flip back to unpaid.
-        case 'invoice.payment_failed':
-        case 'customer.subscription.deleted': {
-          const obj = event.data.object
-          if (obj.customer) {
-            await db.prepare('UPDATE members SET payment_status = ? WHERE stripe_customer_id = ?').run(
-              'unpaid',
-              obj.customer
-            )
-          }
-          break
-        }
-        default:
-          break
-      }
-      return res.json({ received: true })
-    } catch (err) {
-      console.error('Failed to process Stripe webhook event:', err)
-      return res.status(500).send('Webhook processing error')
-    }
-  }
-)
-
 app.use(express.json())
 
 // Basic abuse protection: 5 submissions per IP per 15 minutes
@@ -114,66 +35,16 @@ const contactLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again later.' },
 })
 
-// Login endpoints: looser than contact (real users mistype passwords),
-// but still enough to make brute-forcing impractical.
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many login attempts. Please try again in a few minutes.' },
-})
-
-// Admin login: fewer legitimate retries expected, so a tighter cap.
-const adminLoginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many login attempts. Please try again in a few minutes.' },
-})
-
-// Forgot-password: prevent using it to spam a restaurant's inbox.
-const forgotPasswordLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 3,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many reset requests. Please try again later.' },
-})
-
-// Admin-side transactional email (contact form, membership inquiries,
-// forgot-password, payment confirmation) — sent via Resend's HTTPS API
-// instead of raw SMTP. Render blocks/times out outbound SMTP connections
-// to Gmail from its servers, but a normal HTTPS API call works fine.
-//
-// Admin-side transactional email (contact form, membership inquiries,
-// forgot-password, payment confirmation) AND guest-facing emails (welcome,
-// follow-up, custom messages) all send via Resend's HTTPS API — not raw
-// SMTP. Render blocks/times out outbound SMTP to Gmail from its servers,
-// confirmed in testing for both the admin's own account and restaurant
-// accounts, so this avoids depending on each restaurant's SMTP working.
-// Guest emails send as "{Restaurant Name} <no-reply@dynr.co.uk>" with the
-// restaurant's own email set as reply-to, so replies reach them normally.
-const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
-
-const transporter = {
-  async sendMail({ from, to, subject, text, replyTo }) {
-    if (!resend) {
-      throw new Error('RESEND_API_KEY is not set — admin email is not configured yet.')
-    }
-    const { error } = await resend.emails.send({
-      from: from || process.env.MAIL_FROM || 'dynR <no-reply@dynr.co.uk>',
-      to,
-      subject,
-      text,
-      replyTo,
-    })
-    if (error) {
-      throw new Error(error.message || 'Failed to send email via Resend.')
-    }
+// Mail transport — configure via .env (see .env.example)
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: Number(process.env.SMTP_PORT) || 587,
+  secure: process.env.SMTP_SECURE === 'true',
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
   },
-}
+})
 
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
@@ -187,14 +58,6 @@ function slugify(text) {
     .replace(/(^-|-$)/g, '')
 }
 
-// Fills {{placeholders}} in a restaurant's custom email text.
-// Unknown placeholders are left as-is rather than throwing.
-function fillTemplate(template, vars) {
-  return template.replace(/{{\s*(\w+)\s*}}/g, (match, key) =>
-    key in vars ? String(vars[key]) : match
-  )
-}
-
 function generateMembershipNumber(restaurantName, count) {
   const initials = restaurantName
     .split(' ')
@@ -203,6 +66,33 @@ function generateMembershipNumber(restaurantName, count) {
     .toUpperCase()
     .slice(0, 3)
   return `${initials}-${String(count).padStart(5, '0')}`
+}
+
+// Escapes values before they're interpolated into an HTML email body.
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+// A small "click here to leave a review" button used in guest-facing emails,
+// instead of ever showing the raw Google review URL.
+function reviewButtonHtml(googleReviewUrl) {
+  if (!googleReviewUrl) return ''
+  return `
+    <p style="text-align: center; margin: 28px 0;">
+      <a href="${escapeHtml(googleReviewUrl)}" style="background: #e2672a; color: #ffffff; text-decoration: none; font-weight: bold; padding: 12px 24px; border-radius: 8px; display: inline-block; font-family: Arial, sans-serif; font-size: 15px;">
+        Click here to leave a review
+      </a>
+    </p>
+  `
+}
+
+function reviewLineText(googleReviewUrl, lead) {
+  return googleReviewUrl ? `\n\n${lead} ${googleReviewUrl}` : ''
 }
 
 app.post('/api/contact', contactLimiter, async (req, res) => {
@@ -239,48 +129,6 @@ ${message || '—'}
     return res.status(200).json({ ok: true })
   } catch (err) {
     console.error('Failed to send contact email:', err)
-    return res.status(500).json({ error: 'Failed to send your message. Please try again shortly.' })
-  }
-})
-
-// ---------- Public: "Become a member" inquiry from the Join Us page ----------
-// Restaurants don't self-register — this just notifies you so you can follow
-// up and create their account manually via the admin panel.
-app.post('/api/membership-inquiry', contactLimiter, async (req, res) => {
-  const { restaurantName, contactName, email, phone, message } = req.body || {}
-
-  if (!restaurantName || !contactName || !email) {
-    return res.status(400).json({ error: 'Restaurant name, your name, and email are required.' })
-  }
-
-  if (!isValidEmail(email)) {
-    return res.status(400).json({ error: 'Please enter a valid email address.' })
-  }
-
-  const mailBody = `
-New "Become a Member" inquiry from dynr.co.uk
-
-Restaurant: ${restaurantName}
-Contact name: ${contactName}
-Email: ${email}
-Phone: ${phone || '—'}
-
-Message:
-${message || '—'}
-`.trim()
-
-  try {
-    await transporter.sendMail({
-      from: process.env.MAIL_FROM || '"dynR Website" <no-reply@dynr.co.uk>',
-      to: process.env.MAIL_TO || 'hello@dynr.co.uk',
-      replyTo: email,
-      subject: `New membership inquiry — ${restaurantName}`,
-      text: mailBody,
-    })
-
-    return res.status(200).json({ ok: true })
-  } catch (err) {
-    console.error('Failed to send membership inquiry email:', err)
     return res.status(500).json({ error: 'Failed to send your message. Please try again shortly.' })
   }
 })
@@ -328,7 +176,7 @@ function requireAuth(req, res, next) {
 }
 
 // ---------- Admin: Login ----------
-app.post('/api/admin/login', adminLoginLimiter, (req, res) => {
+app.post('/api/admin/login', (req, res) => {
   const { email, password } = req.body || {}
 
   if (!email || !password) {
@@ -348,17 +196,7 @@ app.post('/api/admin/login', adminLoginLimiter, (req, res) => {
 
 // ---------- Membership: Register a restaurant (admin only) ----------
 app.post('/api/register', requireAdmin, async (req, res) => {
-  const {
-    restaurantName,
-    email,
-    phone,
-    password,
-    smtpHost,
-    smtpPort,
-    smtpUser,
-    smtpPass,
-    googleReviewUrl,
-  } = req.body || {}
+  const { restaurantName, email, phone, password } = req.body || {}
 
   if (!restaurantName || !email || !password) {
     return res.status(400).json({ error: 'Restaurant name, email, and password are required.' })
@@ -372,10 +210,6 @@ app.post('/api/register', requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Password must be at least 8 characters.' })
   }
 
-  if (!stripe || !process.env.STRIPE_PRICE_ID) {
-    return res.status(503).json({ error: 'Billing is not configured yet — set STRIPE_SECRET_KEY and STRIPE_PRICE_ID first.' })
-  }
-
   const existing = await db.prepare('SELECT id FROM members WHERE email = ?').get(email)
   if (existing) {
     return res.status(409).json({ error: 'An account with this email already exists.' })
@@ -385,116 +219,41 @@ app.post('/api/register', requireAdmin, async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 10)
     const slug = slugify(restaurantName)
 
-    // Keep the plaintext password briefly — it's needed to include in the
-    // confirmation email once payment succeeds (bcrypt hashes can't be
-    // reversed). Cleared immediately after that email is sent.
     const result = await db
       .prepare(
-        `INSERT INTO members
-          (restaurant_name, email, phone, password_hash, pending_password, is_paid, slug,
-           smtp_host, smtp_port, smtp_user, smtp_pass, google_review_url)
-         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`
+        'INSERT INTO members (restaurant_name, email, phone, password_hash, is_paid, slug) VALUES (?, ?, ?, ?, 1, ?) RETURNING id'
       )
-      .run(
-        restaurantName,
-        email,
-        phone || null,
-        passwordHash,
-        password,
-        slug,
-        smtpHost || null,
-        smtpPort || null,
-        smtpUser || null,
-        smtpPass || null,
-        googleReviewUrl || null
-      )
+      .run(restaurantName, email, phone || null, passwordHash, slug)
 
-    const memberId = result.lastInsertRowid
-    const appUrl = process.env.APP_URL || 'https://dynr.co.uk'
+    // Email the restaurant their dashboard login details
+    try {
+      await transporter.sendMail({
+        from: process.env.MAIL_FROM || '"dynR" <no-reply@dynr.co.uk>',
+        to: email,
+        subject: 'Your dynR dashboard is ready',
+        text: `Hi ${restaurantName},
 
-    const session = await stripe.checkout.sessions.create({
-      mode: 'subscription',
-      line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
-      customer_email: email,
-      client_reference_id: String(memberId),
-      success_url: `${appUrl}/account-created?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${appUrl}/dynr-team-portal?payment=cancelled`,
-    })
+Your dynR account has been created. Here are your dashboard login details:
 
-    return res.status(201).json({ ok: true, restaurantId: memberId, checkoutUrl: session.url })
-  } catch (err) {
-    console.error('Registration failed:', err)
-    return res.status(500).json({ error: 'Registration failed. Please try again.' })
-  }
-})
-
-// ---------- Public: Confirm a Stripe payment and send the login email ----------
-// Called by the /account-created page after Stripe redirects back. Verifies
-// the session directly with Stripe rather than trusting the URL blindly —
-// this works even without a webhook configured.
-app.get('/api/confirm-payment', async (req, res) => {
-  const { session_id } = req.query || {}
-
-  if (!session_id) {
-    return res.status(400).json({ error: 'Missing session ID.' })
-  }
-
-  if (!stripe) {
-    return res.status(503).json({ error: 'Billing is not configured.' })
-  }
-
-  try {
-    const session = await stripe.checkout.sessions.retrieve(session_id)
-
-    if (session.payment_status !== 'paid') {
-      return res.status(402).json({ error: 'Payment has not been completed yet.' })
-    }
-
-    const memberId = session.client_reference_id
-    const member = memberId ? await db.prepare('SELECT * FROM members WHERE id = ?').get(memberId) : null
-
-    if (!member) {
-      return res.status(404).json({ error: 'Restaurant not found for this payment.' })
-    }
-
-    await db.prepare(
-      'UPDATE members SET payment_status = ?, stripe_customer_id = ?, stripe_subscription_id = ? WHERE id = ?'
-    ).run('paid', session.customer, session.subscription, member.id)
-
-    // Send the confirmation email with their login — only once, using the
-    // pending_password stashed at registration. If it's already been
-    // cleared (e.g. the success page was reloaded), skip re-sending.
-    if (member.pending_password) {
-      try {
-        await transporter.sendMail({
-          from: process.env.MAIL_FROM || '"dynR" <no-reply@dynr.co.uk>',
-          to: member.email,
-          subject: 'Your dynR account is ready',
-          text: `Hi ${member.restaurant_name},
-
-Great news — your payment was successful and your dynR account is now active.
-
-Here are your login details:
 Login page: ${process.env.APP_URL || 'https://dynr.co.uk'}/login
-Email: ${member.email}
-Password: ${member.pending_password}
+Email: ${email}
+Password: ${password}
 
-You can change your password anytime from Settings once you're logged in.
+We'd recommend changing your password after your first login.
 
 Welcome aboard,
 The dynR team`,
-        })
-      } catch (mailErr) {
-        console.error('Failed to send payment-confirmation email:', mailErr)
-      }
-
-      await db.prepare('UPDATE members SET pending_password = NULL WHERE id = ?').run(member.id)
+      })
+    } catch (mailErr) {
+      // Don't fail the whole registration if the email fails to send —
+      // the account is already created, just log it so you notice.
+      console.error('Failed to send welcome email to restaurant:', mailErr)
     }
 
-    return res.json({ ok: true, restaurantName: member.restaurant_name })
+    return res.status(201).json({ ok: true, restaurantId: result.lastInsertRowid })
   } catch (err) {
-    console.error('Failed to confirm payment:', err)
-    return res.status(500).json({ error: 'Failed to confirm payment. Please contact dynR.' })
+    console.error('Registration failed:', err)
+    return res.status(500).json({ error: 'Registration failed. Please try again.' })
   }
 })
 
@@ -504,24 +263,13 @@ The dynR team`,
 // one below it) can change. A restaurant editing their own email/password
 // via /api/login-protected routes never touches payment_status.
 app.get('/api/admin/restaurants', requireAdmin, async (req, res) => {
-  const rows = await db
+  const restaurants = await db
     .prepare(
-      `SELECT id, restaurant_name, email, phone, payment_status, created_at,
-              smtp_host, smtp_user, smtp_pass
+      `SELECT id, restaurant_name, email, phone, payment_status, created_at
        FROM members
        ORDER BY created_at DESC`
     )
     .all()
-
-  const restaurants = rows.map((r) => ({
-    id: r.id,
-    restaurant_name: r.restaurant_name,
-    email: r.email,
-    phone: r.phone,
-    payment_status: r.payment_status,
-    created_at: r.created_at,
-    smtp_configured: !!(r.smtp_host && r.smtp_user && r.smtp_pass),
-  }))
 
   return res.json({ restaurants })
 })
@@ -544,41 +292,8 @@ app.put('/api/admin/restaurants/:id/payment', requireAdmin, async (req, res) => 
   return res.json({ ok: true })
 })
 
-// ---------- Admin: Delete a restaurant (and all their data) ----------
-// Cascades manually — deletes guest_notes and visits for their guests, then
-// scheduled_emails, then the guests themselves, then the member. Order
-// matters here because of the foreign key references.
-app.delete('/api/admin/restaurants/:id', requireAdmin, async (req, res) => {
-  const restaurantId = req.params.id
-
-  const existing = await db.prepare('SELECT id, restaurant_name FROM members WHERE id = ?').get(restaurantId)
-  if (!existing) {
-    return res.status(404).json({ error: 'Restaurant not found.' })
-  }
-
-  try {
-    const guestRows = await db.prepare('SELECT id FROM guests WHERE restaurant_id = ?').all(restaurantId)
-    const guestIds = guestRows.map((g) => g.id)
-
-    for (const guestId of guestIds) {
-      await db.prepare('DELETE FROM guest_notes WHERE guest_id = ?').run(guestId)
-      await db.prepare('DELETE FROM visits WHERE guest_id = ?').run(guestId)
-    }
-
-    await db.prepare('DELETE FROM scheduled_emails WHERE restaurant_id = ?').run(restaurantId)
-    await db.prepare('DELETE FROM guests WHERE restaurant_id = ?').run(restaurantId)
-    await db.prepare('DELETE FROM password_resets WHERE member_id = ?').run(restaurantId)
-    await db.prepare('DELETE FROM members WHERE id = ?').run(restaurantId)
-
-    return res.json({ ok: true, deleted: existing.restaurant_name })
-  } catch (err) {
-    console.error(`Failed to delete restaurant id ${restaurantId}:`, err)
-    return res.status(500).json({ error: 'Failed to delete restaurant. Please try again.' })
-  }
-})
-
 // ---------- Membership: Restaurant Sign In ----------
-app.post('/api/login', loginLimiter, async (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { email, password } = req.body || {}
 
   if (!email || !password) {
@@ -603,7 +318,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 // ---------- Membership: Forgot password ----------
 // Always responds the same way whether or not the email exists, so this
 // endpoint can't be used to check which emails are registered.
-app.post('/api/forgot-password', forgotPasswordLimiter, async (req, res) => {
+app.post('/api/forgot-password', async (req, res) => {
   const { email } = req.body || {}
 
   if (!email || !isValidEmail(email)) {
@@ -726,12 +441,12 @@ app.post('/api/public/guests', async (req, res) => {
 
   try {
     const countRow = await db
-      .prepare('SELECT COUNT(*) as count FROM guests WHERE restaurant_id = ?')
+      .prepare('SELECT COUNT(*)::int as count FROM guests WHERE restaurant_id = ?')
       .get(restaurant.id)
 
     const membershipNumber = generateMembershipNumber(
       restaurant.restaurant_name,
-      Number(countRow.count) + 1
+      countRow.count + 1
     )
 
     await db.prepare(
@@ -739,37 +454,47 @@ app.post('/api/public/guests', async (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(restaurant.id, name, email, phone, birthdayDay, birthdayMonth, membershipNumber)
 
-    // Send welcome email via dynR's own Resend account, on the restaurant's
-    // behalf — "from" shows their name, "reply-to" is their real email, so
-    // replying reaches them normally. No SMTP setup required on their end.
-    try {
-      const defaultWelcomeText = `Welcome to the family, ${name.split(' ')[0]}!
+    // Send welcome email using the restaurant's own SMTP if they've set it up.
+    // If not configured yet, skip silently — guest is still created either way.
+    if (restaurant.smtp_host && restaurant.smtp_user && restaurant.smtp_pass) {
+      try {
+        const restaurantTransporter = nodemailer.createTransport({
+          host: restaurant.smtp_host,
+          port: Number(restaurant.smtp_port) || 587,
+          secure: false,
+          auth: {
+            user: restaurant.smtp_user,
+            pass: restaurant.smtp_pass,
+          },
+        })
+
+        const firstName = name.split(' ')[0]
+
+        await restaurantTransporter.sendMail({
+          from: restaurant.smtp_user,
+          to: email,
+          subject: `You're one of ours now, ${firstName}`,
+          text: `Welcome to the family, ${firstName}!
 
 Thank you for becoming part of the ${restaurant.restaurant_name} family — we're so glad to have you. Keep an eye on your inbox for exciting member-only offers and news, just for members like you.
 
-Your membership number: ${membershipNumber}
+Your membership number: ${membershipNumber}${reviewLineText(restaurant.google_review_url, "If you'd like, we'd love a quick review here:")}
 
 Warmly,
-The ${restaurant.restaurant_name} team`
-
-      const welcomeText = restaurant.welcome_email_text
-        ? fillTemplate(restaurant.welcome_email_text, {
-            first_name: name.split(' ')[0],
-            name,
-            restaurant_name: restaurant.restaurant_name,
-            membership_number: membershipNumber,
-          })
-        : defaultWelcomeText
-
-      await transporter.sendMail({
-        from: `"${restaurant.restaurant_name}" <${process.env.MAIL_FROM_ADDRESS || 'no-reply@dynr.co.uk'}>`,
-        to: email,
-        replyTo: restaurant.smtp_user || restaurant.email,
-        subject: `You're one of ours now, ${name.split(' ')[0]}`,
-        text: welcomeText,
-      })
-    } catch (mailErr) {
-      console.error('Failed to send guest welcome email:', mailErr)
+The ${restaurant.restaurant_name} team`,
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; color: #2b2b2b;">
+              <h2 style="color: #171717; margin-bottom: 16px;">Welcome to the family, ${escapeHtml(firstName)}!</h2>
+              <p>Thank you for becoming part of the <strong>${escapeHtml(restaurant.restaurant_name)}</strong> family — we're so glad to have you. Keep an eye on your inbox for exciting member-only offers and news, just for members like you.</p>
+              <p>Your membership number: <strong>${escapeHtml(membershipNumber)}</strong></p>
+              ${reviewButtonHtml(restaurant.google_review_url)}
+              <p>Warmly,<br/>The ${escapeHtml(restaurant.restaurant_name)} team</p>
+            </div>
+          `,
+        })
+      } catch (mailErr) {
+        console.error('Failed to send guest welcome email:', mailErr)
+      }
     }
 
     return res.status(201).json({ ok: true, membershipNumber })
@@ -777,6 +502,146 @@ The ${restaurant.restaurant_name} team`
     console.error('Guest sign-up failed:', err)
     return res.status(500).json({ error: 'Something went wrong. Please try again.' })
   }
+})
+
+// ---------- Public: Table reservation submission ----------
+app.post('/api/public/reservations', async (req, res) => {
+  const {
+    slug,
+    name,
+    email,
+    phone,
+    partySize,
+    reservationDate,
+    reservationTime,
+    notes,
+  } = req.body || {}
+
+  if (!slug || !name || !phone || !partySize || !reservationDate || !reservationTime) {
+    return res.status(400).json({ error: 'Please fill in all required fields.' })
+  }
+
+  if (email && !isValidEmail(email)) {
+    return res.status(400).json({ error: 'Please enter a valid email address.' })
+  }
+
+  const partySizeNum = Number(partySize)
+  if (!Number.isInteger(partySizeNum) || partySizeNum < 1 || partySizeNum > 30) {
+    return res.status(400).json({ error: 'Please enter a valid party size.' })
+  }
+
+  const restaurant = await db.prepare('SELECT * FROM members WHERE slug = ?').get(slug)
+  if (!restaurant) {
+    return res.status(404).json({ error: 'Restaurant not found.' })
+  }
+
+  try {
+    const result = await db
+      .prepare(
+        `INSERT INTO reservations (restaurant_id, name, email, phone, party_size, reservation_date, reservation_time, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+      )
+      .run(
+        restaurant.id,
+        name,
+        email || null,
+        phone,
+        partySizeNum,
+        reservationDate,
+        reservationTime,
+        notes || null
+      )
+
+    // Notify the restaurant of the new reservation, via their own SMTP.
+    // If they haven't set it up yet, the reservation is still saved and
+    // visible in their dashboard either way.
+    if (restaurant.smtp_host && restaurant.smtp_user && restaurant.smtp_pass) {
+      try {
+        const restaurantTransporter = nodemailer.createTransport({
+          host: restaurant.smtp_host,
+          port: Number(restaurant.smtp_port) || 587,
+          secure: false,
+          auth: { user: restaurant.smtp_user, pass: restaurant.smtp_pass },
+        })
+
+        const notesLineText = notes ? `\nSpecial requests: ${notes}` : ''
+
+        await restaurantTransporter.sendMail({
+          from: restaurant.smtp_user,
+          to: restaurant.smtp_user,
+          replyTo: email || undefined,
+          subject: `New table reservation — ${name} (party of ${partySizeNum}) on ${reservationDate}`,
+          text: `You have a new table reservation via dynR:
+
+Name: ${name}
+Party size: ${partySizeNum}
+Date: ${reservationDate}
+Time: ${reservationTime}
+Phone: ${phone}
+Email: ${email || '—'}${notesLineText}
+
+This reservation is also saved in your dynR dashboard under Reservations.`,
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; color: #2b2b2b;">
+              <h2 style="color: #171717; margin-bottom: 16px;">New table reservation</h2>
+              <table style="width: 100%; border-collapse: collapse; font-size: 15px;">
+                <tr><td style="padding: 6px 0; color: #6f6f6f;">Name</td><td style="padding: 6px 0;"><strong>${escapeHtml(name)}</strong></td></tr>
+                <tr><td style="padding: 6px 0; color: #6f6f6f;">Party size</td><td style="padding: 6px 0;">${escapeHtml(String(partySizeNum))}</td></tr>
+                <tr><td style="padding: 6px 0; color: #6f6f6f;">Date</td><td style="padding: 6px 0;">${escapeHtml(reservationDate)}</td></tr>
+                <tr><td style="padding: 6px 0; color: #6f6f6f;">Time</td><td style="padding: 6px 0;">${escapeHtml(reservationTime)}</td></tr>
+                <tr><td style="padding: 6px 0; color: #6f6f6f;">Phone</td><td style="padding: 6px 0;">${escapeHtml(phone)}</td></tr>
+                <tr><td style="padding: 6px 0; color: #6f6f6f;">Email</td><td style="padding: 6px 0;">${email ? escapeHtml(email) : '—'}</td></tr>
+                ${notes ? `<tr><td style="padding: 6px 0; color: #6f6f6f; vertical-align: top;">Notes</td><td style="padding: 6px 0;">${escapeHtml(notes)}</td></tr>` : ''}
+              </table>
+              <p style="margin-top: 20px; color: #6f6f6f; font-size: 13px;">This reservation is also saved in your dynR dashboard under Reservations.</p>
+            </div>
+          `,
+        })
+      } catch (mailErr) {
+        console.error('Failed to send reservation notification email:', mailErr)
+      }
+    }
+
+    return res.status(201).json({ ok: true, reservationId: result.lastInsertRowid })
+  } catch (err) {
+    console.error('Reservation submission failed:', err)
+    return res.status(500).json({ error: 'Something went wrong. Please try again.' })
+  }
+})
+
+// ---------- Reservations: list for the logged-in restaurant ----------
+app.get('/api/reservations', requireAuth, async (req, res) => {
+  const reservations = await db
+    .prepare(
+      `SELECT id, name, email, phone, party_size, reservation_date, reservation_time, notes, status, created_at
+       FROM reservations
+       WHERE restaurant_id = ?
+       ORDER BY reservation_date ASC, reservation_time ASC`
+    )
+    .all(req.memberId)
+
+  return res.json({ reservations })
+})
+
+// ---------- Reservations: update status (confirm/cancel) ----------
+app.put('/api/reservations/:id/status', requireAuth, async (req, res) => {
+  const { status } = req.body || {}
+
+  if (!['pending', 'confirmed', 'cancelled'].includes(status)) {
+    return res.status(400).json({ error: "status must be 'pending', 'confirmed', or 'cancelled'." })
+  }
+
+  const existing = await db
+    .prepare('SELECT id FROM reservations WHERE id = ? AND restaurant_id = ?')
+    .get(req.params.id, req.memberId)
+
+  if (!existing) {
+    return res.status(404).json({ error: 'Reservation not found.' })
+  }
+
+  await db.prepare('UPDATE reservations SET status = ? WHERE id = ?').run(status, req.params.id)
+
+  return res.json({ ok: true })
 })
 
 // ---------- Guests: list all guests for the logged-in restaurant ----------
@@ -790,7 +655,7 @@ app.get('/api/guests', requireAuth, async (req, res) => {
         g.phone,
         g.membership_number,
         g.created_at,
-        (SELECT COUNT(*) FROM visits WHERE guest_id = g.id) as visit_count,
+        (SELECT COUNT(*)::int FROM visits WHERE guest_id = g.id) as visit_count,
         (SELECT visited_at FROM visits WHERE guest_id = g.id ORDER BY visited_at DESC LIMIT 1) as last_visit,
         (SELECT note_text FROM guest_notes WHERE guest_id = g.id ORDER BY created_at DESC LIMIT 1) as latest_note
       FROM guests g
@@ -826,23 +691,6 @@ app.post('/api/guests/:id/visit', requireAuth, async (req, res) => {
   return res.json({ ok: true })
 })
 
-// ---------- Guests: list all notes for a guest ----------
-app.get('/api/guests/:id/notes', requireAuth, async (req, res) => {
-  const guest = await db
-    .prepare('SELECT id FROM guests WHERE id = ? AND restaurant_id = ?')
-    .get(req.params.id, req.memberId)
-
-  if (!guest) {
-    return res.status(404).json({ error: 'Guest not found.' })
-  }
-
-  const notes = await db
-    .prepare('SELECT id, note_text, created_at FROM guest_notes WHERE guest_id = ? ORDER BY created_at DESC')
-    .all(guest.id)
-
-  return res.json({ notes })
-})
-
 // ---------- Guests: add a note ----------
 app.post('/api/guests/:id/notes', requireAuth, async (req, res) => {
   const { noteText } = req.body || {}
@@ -859,40 +707,10 @@ app.post('/api/guests/:id/notes', requireAuth, async (req, res) => {
     return res.status(404).json({ error: 'Guest not found.' })
   }
 
-  const result = await db
-    .prepare('INSERT INTO guest_notes (guest_id, note_text) VALUES (?, ?)')
-    .run(guest.id, noteText.trim())
-
-  return res.json({ ok: true, noteId: Number(result.lastInsertRowid) })
-})
-
-// ---------- Guests: edit an existing note ----------
-// Previous notes are never overwritten by this — only the one note whose id
-// is in the URL changes. The full history stays intact and visible.
-app.put('/api/guests/:guestId/notes/:noteId', requireAuth, async (req, res) => {
-  const { noteText } = req.body || {}
-
-  if (!noteText || !noteText.trim()) {
-    return res.status(400).json({ error: 'Note text is required.' })
-  }
-
-  const guest = await db
-    .prepare('SELECT id FROM guests WHERE id = ? AND restaurant_id = ?')
-    .get(req.params.guestId, req.memberId)
-
-  if (!guest) {
-    return res.status(404).json({ error: 'Guest not found.' })
-  }
-
-  const note = await db
-    .prepare('SELECT id FROM guest_notes WHERE id = ? AND guest_id = ?')
-    .get(req.params.noteId, guest.id)
-
-  if (!note) {
-    return res.status(404).json({ error: 'Note not found.' })
-  }
-
-  await db.prepare('UPDATE guest_notes SET note_text = ? WHERE id = ?').run(noteText.trim(), note.id)
+  await db.prepare('INSERT INTO guest_notes (guest_id, note_text) VALUES (?, ?)').run(
+    guest.id,
+    noteText.trim()
+  )
 
   return res.json({ ok: true })
 })
@@ -907,6 +725,12 @@ app.post('/api/guests/message', requireAuth, async (req, res) => {
 
   const restaurant = await db.prepare('SELECT * FROM members WHERE id = ?').get(req.memberId)
 
+  if (!restaurant.smtp_host || !restaurant.smtp_user || !restaurant.smtp_pass) {
+    return res.status(400).json({
+      error: 'Please set up your email in Settings before sending messages.',
+    })
+  }
+
   const placeholders = guestIds.map(() => '?').join(',')
   const guests = await db
     .prepare(
@@ -919,34 +743,38 @@ app.post('/api/guests/message', requireAuth, async (req, res) => {
   }
 
   try {
-    let sentCount = 0
+    const restaurantTransporter = nodemailer.createTransport({
+      host: restaurant.smtp_host,
+      port: Number(restaurant.smtp_port) || 587,
+      secure: false,
+      auth: {
+        user: restaurant.smtp_user,
+        pass: restaurant.smtp_pass,
+      },
+    })
+
     for (const guest of guests) {
       if (!guest.email) continue
 
-      await transporter.sendMail({
-        from: `"${restaurant.restaurant_name}" <${process.env.MAIL_FROM_ADDRESS || 'no-reply@dynr.co.uk'}>`,
+      await restaurantTransporter.sendMail({
+        from: restaurant.smtp_user,
         to: guest.email,
-        replyTo: restaurant.smtp_user || restaurant.email,
         subject: `A message from ${restaurant.restaurant_name}`,
         text: `Hi ${guest.name.split(' ')[0]},\n\n${message}\n\nWarmly,\n${restaurant.restaurant_name}`,
       })
-      sentCount++
     }
 
-    return res.json({ ok: true, sent: sentCount })
+    return res.json({ ok: true, sent: guests.length })
   } catch (err) {
     console.error('Failed to send guest message:', err)
-    return res.status(500).json({ error: 'Failed to send message. Please try again.' })
+    return res.status(500).json({ error: 'Failed to send message. Please check your email settings.' })
   }
 })
-
 // ---------- Settings: Get current restaurant settings ----------
 app.get('/api/settings', requireAuth, async (req, res) => {
   const member = await db
     .prepare(
-      `SELECT smtp_host, smtp_port, smtp_user, smtp_pass, google_review_url,
-              welcome_email_text, followup_email_text, payment_status
-       FROM members WHERE id = ?`
+      'SELECT smtp_host, smtp_port, smtp_user, smtp_pass, google_review_url FROM members WHERE id = ?'
     )
     .get(req.memberId)
 
@@ -954,55 +782,26 @@ app.get('/api/settings', requireAuth, async (req, res) => {
     return res.status(404).json({ error: 'Restaurant not found.' })
   }
 
-  // Never send the actual password back to the browser — it'd sit in
-  // plaintext in the API response / Network tab. The frontend only needs
-  // to know whether one is already saved.
-  const { smtp_pass, ...safeMember } = member
-
-  return res.json({ settings: { ...safeMember, smtp_configured: !!smtp_pass } })
+  return res.json({ settings: member })
 })
 
-// ---------- Settings: Update SMTP + Google review link + email templates ----------
+// ---------- Settings: Update SMTP + Google review link ----------
 app.put('/api/settings', requireAuth, async (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, googleReviewUrl, welcomeEmailText, followupEmailText } =
-    req.body || {}
+  const { smtpHost, smtpPort, smtpUser, smtpPass, googleReviewUrl } = req.body || {}
 
   try {
-    // If smtpPass is left blank, keep whatever password is already saved
-    // instead of wiping it out — the frontend never receives the real
-    // value, so an empty field here doesn't mean "clear the password."
-    if (smtpPass && smtpPass.trim()) {
-      await db.prepare(
-        `UPDATE members
-         SET smtp_host = ?, smtp_port = ?, smtp_user = ?, smtp_pass = ?, google_review_url = ?,
-             welcome_email_text = ?, followup_email_text = ?
-         WHERE id = ?`
-      ).run(
-        smtpHost || null,
-        smtpPort || null,
-        smtpUser || null,
-        smtpPass,
-        googleReviewUrl || null,
-        welcomeEmailText || null,
-        followupEmailText || null,
-        req.memberId
-      )
-    } else {
-      await db.prepare(
-        `UPDATE members
-         SET smtp_host = ?, smtp_port = ?, smtp_user = ?, google_review_url = ?,
-             welcome_email_text = ?, followup_email_text = ?
-         WHERE id = ?`
-      ).run(
-        smtpHost || null,
-        smtpPort || null,
-        smtpUser || null,
-        googleReviewUrl || null,
-        welcomeEmailText || null,
-        followupEmailText || null,
-        req.memberId
-      )
-    }
+    await db.prepare(
+      `UPDATE members
+       SET smtp_host = ?, smtp_port = ?, smtp_user = ?, smtp_pass = ?, google_review_url = ?
+       WHERE id = ?`
+    ).run(
+      smtpHost || null,
+      smtpPort || null,
+      smtpUser || null,
+      smtpPass || null,
+      googleReviewUrl || null,
+      req.memberId
+    )
 
     return res.json({ ok: true })
   } catch (err) {
@@ -1010,35 +809,6 @@ app.put('/api/settings', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'Failed to save settings. Please try again.' })
   }
 })
-
-// ---------- Change password (for a restaurant already logged in) ----------
-app.put('/api/change-password', requireAuth, async (req, res) => {
-  const { currentPassword, newPassword } = req.body || {}
-
-  if (!currentPassword || !newPassword) {
-    return res.status(400).json({ error: 'Current password and new password are required.' })
-  }
-
-  if (newPassword.length < 8) {
-    return res.status(400).json({ error: 'New password must be at least 8 characters.' })
-  }
-
-  const member = await db.prepare('SELECT * FROM members WHERE id = ?').get(req.memberId)
-  if (!member) {
-    return res.status(404).json({ error: 'Restaurant not found.' })
-  }
-
-  const isMatch = await bcrypt.compare(currentPassword, member.password_hash)
-  if (!isMatch) {
-    return res.status(401).json({ error: 'Current password is incorrect.' })
-  }
-
-  const newHash = await bcrypt.hash(newPassword, 10)
-  await db.prepare('UPDATE members SET password_hash = ? WHERE id = ?').run(newHash, req.memberId)
-
-  return res.json({ ok: true })
-})
-
 // ---------- Background poller: send due "thanks for visiting" emails ----------
 async function sendDueScheduledEmails() {
   let due
@@ -1047,8 +817,7 @@ async function sendDueScheduledEmails() {
     due = await db
       .prepare(
         `SELECT se.id as scheduled_id, g.id as guest_id, g.name, g.email,
-                m.restaurant_name, m.email as restaurant_email, m.smtp_user,
-                m.google_review_url, m.followup_email_text
+                m.restaurant_name, m.smtp_host, m.smtp_port, m.smtp_user, m.smtp_pass, m.google_review_url
          FROM scheduled_emails se
          JOIN guests g ON g.id = se.guest_id
          JOIN members m ON m.id = se.restaurant_id
@@ -1061,8 +830,8 @@ async function sendDueScheduledEmails() {
   }
 
   for (const row of due) {
-    // No email on file for the guest — skip, don't retry forever.
-    if (!row.email) {
+    // No email on file, or restaurant hasn't set up their SMTP yet — skip, don't retry forever.
+    if (!row.email || !row.smtp_host || !row.smtp_user || !row.smtp_pass) {
       try {
         await db.prepare('UPDATE scheduled_emails SET status = ? WHERE id = ?').run('skipped', row.scheduled_id)
       } catch (err) {
@@ -1072,27 +841,28 @@ async function sendDueScheduledEmails() {
     }
 
     try {
-      const reviewLine = row.google_review_url
-        ? `\n\nIf you enjoyed your visit, we'd love a quick review here: ${row.google_review_url}`
-        : ''
+      const restaurantTransporter = nodemailer.createTransport({
+        host: row.smtp_host,
+        port: Number(row.smtp_port) || 587,
+        secure: false,
+        auth: { user: row.smtp_user, pass: row.smtp_pass },
+      })
 
-      const defaultFollowupText = `Hi ${row.name.split(' ')[0]},\n\nThanks so much for visiting ${row.restaurant_name} today — we hope you had a great time.${reviewLine}\n\nSee you again soon,\nThe ${row.restaurant_name} team`
+      const firstName = row.name.split(' ')[0]
 
-      const followupText = row.followup_email_text
-        ? fillTemplate(row.followup_email_text, {
-            first_name: row.name.split(' ')[0],
-            name: row.name,
-            restaurant_name: row.restaurant_name,
-            review_link: row.google_review_url || '',
-          })
-        : defaultFollowupText
-
-      await transporter.sendMail({
-        from: `"${row.restaurant_name}" <${process.env.MAIL_FROM_ADDRESS || 'no-reply@dynr.co.uk'}>`,
+      await restaurantTransporter.sendMail({
+        from: row.smtp_user,
         to: row.email,
-        replyTo: row.smtp_user || row.restaurant_email || undefined,
         subject: `Thanks for visiting ${row.restaurant_name}!`,
-        text: followupText,
+        text: `Hi ${firstName},\n\nThanks so much for visiting ${row.restaurant_name} today — we hope you had a great time.${reviewLineText(row.google_review_url, "If you enjoyed your visit, we'd love a quick review here:")}\n\nSee you again soon,\nThe ${row.restaurant_name} team`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; color: #2b2b2b;">
+            <h2 style="color: #171717; margin-bottom: 16px;">Thanks for visiting, ${escapeHtml(firstName)}!</h2>
+            <p>Thanks so much for visiting <strong>${escapeHtml(row.restaurant_name)}</strong> today — we hope you had a great time.</p>
+            ${reviewButtonHtml(row.google_review_url)}
+            <p>See you again soon,<br/>The ${escapeHtml(row.restaurant_name)} team</p>
+          </div>
+        `,
       })
 
       await db.prepare('UPDATE scheduled_emails SET status = ? WHERE id = ?').run('sent', row.scheduled_id)
@@ -1103,25 +873,92 @@ async function sendDueScheduledEmails() {
   }
 }
 
-// ---------- Startup ----------
-// Postgres init is async, so the whole startup sequence waits for tables
-// to be ready before accepting traffic or running the email poller.
-async function start() {
+// ---------- Background poller: send birthday emails ----------
+// Runs hourly rather than once a day, so a guest's birthday email still goes
+// out even if the server happens to restart/redeploy at the "usual" time.
+// last_birthday_email_year makes repeated runs on the same day harmless.
+async function sendBirthdayEmails() {
+  const now = new Date()
+  const todayMonth = now.getUTCMonth() + 1
+  const todayDay = now.getUTCDate()
+  const todayYear = now.getUTCFullYear()
+
+  let dueGuests
   try {
-    await initDb()
-    console.log('Database ready.')
+    dueGuests = await db
+      .prepare(
+        `SELECT g.id as guest_id, g.name, g.email,
+                m.restaurant_name, m.smtp_host, m.smtp_port, m.smtp_user, m.smtp_pass, m.google_review_url
+         FROM guests g
+         JOIN members m ON m.id = g.restaurant_id
+         WHERE g.birthday_month = ? AND g.birthday_day = ?
+           AND (g.last_birthday_email_year IS NULL OR g.last_birthday_email_year <> ?)
+           AND g.email IS NOT NULL`
+      )
+      .all(todayMonth, todayDay, todayYear)
   } catch (err) {
-    console.error('Failed to initialize database — exiting:', err)
-    process.exit(1)
+    console.error('Failed to query birthday guests — skipping this poll cycle:', err)
+    return
   }
 
-  // Check every minute. Good enough for a "within the hour" follow-up without hammering SMTP.
-  setInterval(sendDueScheduledEmails, 60 * 1000)
+  for (const row of dueGuests) {
+    // Restaurant hasn't set up SMTP yet — mark this year as handled so we
+    // don't keep re-querying the same guest every hour, but don't pretend
+    // an email actually went out.
+    if (!row.smtp_host || !row.smtp_user || !row.smtp_pass) {
+      try {
+        await db
+          .prepare('UPDATE guests SET last_birthday_email_year = ? WHERE id = ?')
+          .run(todayYear, row.guest_id)
+      } catch (err) {
+        console.error(`Failed to mark birthday email as skipped for guest ${row.guest_id}:`, err)
+      }
+      continue
+    }
 
-  app.listen(PORT, () => {
-    console.log(`dynR backend listening on http://localhost:${PORT}`)
-    sendDueScheduledEmails() // catch anything that was due while the server was down
-  })
+    try {
+      const restaurantTransporter = nodemailer.createTransport({
+        host: row.smtp_host,
+        port: Number(row.smtp_port) || 587,
+        secure: false,
+        auth: { user: row.smtp_user, pass: row.smtp_pass },
+      })
+
+      const firstName = row.name.split(' ')[0]
+
+      await restaurantTransporter.sendMail({
+        from: row.smtp_user,
+        to: row.email,
+        subject: `Happy Birthday from ${row.restaurant_name}!`,
+        text: `Hi ${firstName},\n\nHappy birthday from all of us at ${row.restaurant_name}! We'd love to help you celebrate — come see us this month.${reviewLineText(row.google_review_url, "And if you enjoy your visit, we'd love a quick review here:")}\n\nSee you soon,\nThe ${row.restaurant_name} team`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; color: #2b2b2b;">
+            <h2 style="color: #171717; margin-bottom: 16px;">Happy Birthday, ${escapeHtml(firstName)}!</h2>
+            <p>Happy birthday from all of us at <strong>${escapeHtml(row.restaurant_name)}</strong>! We'd love to help you celebrate — come see us this month.</p>
+            ${reviewButtonHtml(row.google_review_url)}
+            <p>See you soon,<br/>The ${escapeHtml(row.restaurant_name)} team</p>
+          </div>
+        `,
+      })
+
+      await db
+        .prepare('UPDATE guests SET last_birthday_email_year = ? WHERE id = ?')
+        .run(todayYear, row.guest_id)
+    } catch (err) {
+      console.error(`Failed to send birthday email to guest ${row.guest_id}:`, err)
+      // Don't mark as sent — this guest will simply be retried on the next poll today.
+    }
+  }
 }
 
-start()
+// Check every minute for visit follow-ups (needs to be timely, within the hour).
+setInterval(sendDueScheduledEmails, 60 * 1000)
+
+// Check hourly for birthdays — no need to poll more often than that.
+setInterval(sendBirthdayEmails, 60 * 60 * 1000)
+
+app.listen(PORT, () => {
+  console.log(`dynR backend listening on http://localhost:${PORT}`)
+  sendDueScheduledEmails() // catch anything that was due while the server was down
+  sendBirthdayEmails() // catch today's birthdays even if the server just started
+})

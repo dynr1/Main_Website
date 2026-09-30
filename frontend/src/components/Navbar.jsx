@@ -35,7 +35,10 @@ export default function Navbar() {
         </Link>
       </div>
 
-      <nav className={`nav-dropdown ${open ? "is-open" : ""}`}>
+      <nav
+        className={`nav-dropdown ${open ? "is-open" : ""}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <Link className={isActive("/")} to="/">
           Home
         </Link>
@@ -48,11 +51,9 @@ export default function Navbar() {
         <Link className={isActive("/for-restaurants")} to="/for-restaurants">
           For Restaurants
         </Link>
-
-        <Link className={isActive("/get-started")} to="/get-started">
-          Get Started
+        <Link className={isActive("/faq")} to="/faq">
+          FAQ
         </Link>
-
         <Link className={isActive("/contact")} to="/contact">
           Contact
         </Link>

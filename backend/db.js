@@ -5,80 +5,65 @@ import pg from 'pg'
 
 const { Pool } = pg
 
-if (!process.env.POSTGRES_URL) {
-  throw new Error('POSTGRES_URL is not set. Add it to your .env (see .env.example).')
-}
+// DATABASE_URL comes from your Postgres provider (e.g. Neon). Locally against
+// a plain Postgres install, no SSL is needed; hosted providers require it.
+const connectionString = process.env.POSTGRES_URL
 
 const pool = new Pool({
-  connectionString: process.env.POSTGRES_URL,
-  ssl: { rejectUnauthorized: false },
+  connectionString,
+  ssl:
+    connectionString && !connectionString.includes('localhost')
+      ? { rejectUnauthorized: false }
+      : false,
 })
 
-pool.on('error', (err) => {
-  console.error('Unexpected Postgres pool error:', err)
-})
-
-// Converts a SQLite-style '?' placeholder query into Postgres '$1, $2, ...'
-// style, so the rest of the codebase didn't need every query rewritten.
+// Converts SQLite-style '?' placeholders to Postgres-style '$1, $2, ...'
+// placeholders, so the rest of the app can keep writing '?' like before.
 function toPgQuery(sql) {
   let i = 0
   return sql.replace(/\?/g, () => `$${++i}`)
 }
 
-// Thin compatibility layer mimicking the synchronous better-sqlite3-style
-// API (`db.prepare(sql).get(...)`, `.all(...)`, `.run(...)`) that the rest
-// of the app already uses — but async, since Postgres queries are async.
-// Every call site elsewhere in the codebase now needs `await` in front of
-// these, since they return Promises instead of values directly.
-const db = {
-  prepare(sql) {
-    const pgSql = toPgQuery(sql)
-
-    return {
-      async get(...params) {
-        const result = await pool.query(pgSql, params)
-        return result.rows[0] || undefined
-      },
-      async all(...params) {
-        const result = await pool.query(pgSql, params)
-        return result.rows
-      },
-      async run(...params) {
-        // Emulate better-sqlite3's `lastInsertRowid` for INSERTs by
-        // appending RETURNING id, unless the caller already specified one.
-        const isInsert = /^\s*INSERT/i.test(pgSql)
-        const alreadyReturning = /RETURNING/i.test(pgSql)
-        const finalSql = isInsert && !alreadyReturning ? `${pgSql} RETURNING id` : pgSql
-
-        const result = await pool.query(finalSql, params)
-        return {
-          lastInsertRowid: result.rows[0]?.id,
-          changes: result.rowCount,
-        }
-      },
-    }
-  },
-}
-
-// Runs a series of CREATE TABLE / ALTER TABLE statements directly (no
-// placeholders needed here, so it bypasses the .prepare() shim above).
-async function exec(sql) {
-  await pool.query(sql)
-}
-
-async function addColumnIfMissing(table, column, type) {
-  try {
-    await exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${type}`)
-  } catch (err) {
-    console.error(`Failed to ensure column ${table}.${column}:`, err)
+// A thin compatibility layer so server.js's existing
+// db.prepare(sql).get/.all/.run(...) call sites keep working, just async now.
+function prepare(sql) {
+  const pgSql = toPgQuery(sql)
+  return {
+    async get(...params) {
+      const result = await pool.query(pgSql, params)
+      return result.rows[0]
+    },
+    async all(...params) {
+      const result = await pool.query(pgSql, params)
+      return result.rows
+    },
+    async run(...params) {
+      const result = await pool.query(pgSql, params)
+      return {
+        // Only populated for INSERT queries that end in "RETURNING id".
+        lastInsertRowid: result.rows[0]?.id,
+        changes: result.rowCount,
+      }
+    },
   }
 }
 
-// Creates all tables if they don't exist yet, and adds any columns that
-// were added over time. Call this once at startup and await it before the
-// server starts accepting requests.
-async function initDb() {
-  await exec(`
+// Safely add a column only if it doesn't already exist —
+// prevents errors on every server restart.
+async function addColumnIfMissing(table, column, type) {
+  try {
+    await pool.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`)
+  } catch (err) {
+    // Column already exists — safe to ignore
+  }
+}
+
+// Matches the "YYYY-MM-DD HH:MM:SS" string format the app previously got
+// from SQLite's datetime('now'), so existing .slice(0, 10) calls etc. keep working.
+const NOW_UTC = `to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`
+
+async function setup() {
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS members (
       id SERIAL PRIMARY KEY,
       restaurant_name TEXT NOT NULL,
@@ -86,7 +71,7 @@ async function initDb() {
       phone TEXT,
       password_hash TEXT NOT NULL,
       is_paid INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+      created_at TEXT NOT NULL DEFAULT ${NOW_UTC}
     )
   `)
 
@@ -97,13 +82,8 @@ async function initDb() {
   await addColumnIfMissing('members', 'google_review_url', 'TEXT')
   await addColumnIfMissing('members', 'slug', 'TEXT')
   await addColumnIfMissing('members', 'payment_status', "TEXT NOT NULL DEFAULT 'unpaid'")
-  await addColumnIfMissing('members', 'stripe_customer_id', 'TEXT')
-  await addColumnIfMissing('members', 'stripe_subscription_id', 'TEXT')
-  await addColumnIfMissing('members', 'welcome_email_text', 'TEXT')
-  await addColumnIfMissing('members', 'followup_email_text', 'TEXT')
-  await addColumnIfMissing('members', 'pending_password', 'TEXT')
 
-  await exec(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS guests (
       id SERIAL PRIMARY KEY,
       restaurant_id INTEGER NOT NULL REFERENCES members(id),
@@ -113,49 +93,74 @@ async function initDb() {
       birthday_day INTEGER,
       birthday_month INTEGER,
       membership_number TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+      created_at TEXT NOT NULL DEFAULT ${NOW_UTC}
     )
   `)
 
-  await exec(`
+  // Tracks the last year a birthday email was sent to this guest, so the
+  // hourly poller never sends two birthday emails in the same year.
+  await addColumnIfMissing('guests', 'last_birthday_email_year', 'INTEGER')
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS visits (
       id SERIAL PRIMARY KEY,
       guest_id INTEGER NOT NULL REFERENCES guests(id),
-      visited_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+      visited_at TEXT NOT NULL DEFAULT ${NOW_UTC}
     )
   `)
 
-  await exec(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS guest_notes (
       id SERIAL PRIMARY KEY,
       guest_id INTEGER NOT NULL REFERENCES guests(id),
       note_text TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+      created_at TEXT NOT NULL DEFAULT ${NOW_UTC}
     )
   `)
 
-  await exec(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS scheduled_emails (
       id SERIAL PRIMARY KEY,
       guest_id INTEGER NOT NULL REFERENCES guests(id),
       restaurant_id INTEGER NOT NULL REFERENCES members(id),
       send_at TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
-      created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+      created_at TEXT NOT NULL DEFAULT ${NOW_UTC}
     )
   `)
 
-  await exec(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS password_resets (
       id SERIAL PRIMARY KEY,
       member_id INTEGER NOT NULL REFERENCES members(id),
       token TEXT NOT NULL UNIQUE,
       expires_at TEXT NOT NULL,
       used INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+      created_at TEXT NOT NULL DEFAULT ${NOW_UTC}
+    )
+  `)
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS reservations (
+      id SERIAL PRIMARY KEY,
+      restaurant_id INTEGER NOT NULL REFERENCES members(id),
+      name TEXT NOT NULL,
+      email TEXT,
+      phone TEXT NOT NULL,
+      party_size INTEGER NOT NULL,
+      reservation_date TEXT NOT NULL,
+      reservation_time TEXT NOT NULL,
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL DEFAULT ${NOW_UTC}
     )
   `)
 }
 
+// Runs once, when the module is first imported — server.js can rely on the
+// schema already being in place by the time its routes start handling requests.
+await setup()
+
+const db = { prepare, pool }
+
 export default db
-export { initDb }

@@ -4,40 +4,44 @@ import { API_URL } from "../api";
 export default function Dashboard() {
   const [restaurant, setRestaurant] = useState(null);
   const [guests, setGuests] = useState([]);
+  const [reservations, setReservations] = useState([]);
+  const [view, setView] = useState("guests"); // "guests" | "reservations"
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [selected, setSelected] = useState([]);
   const [activeGuest, setActiveGuest] = useState(null);
   const [showQR, setShowQR] = useState(false);
+  const [showReservationLink, setShowReservationLink] = useState(false);
   const [messageTarget, setMessageTarget] = useState(null);
   const [messageText, setMessageText] = useState("");
   const [messageStatus, setMessageStatus] = useState("idle");
   const [noteText, setNoteText] = useState("");
   const [showNoteBox, setShowNoteBox] = useState(false);
-  const [guestNotes, setGuestNotes] = useState([]);
-  const [notesLoading, setNotesLoading] = useState(false);
-  const [editingNoteId, setEditingNoteId] = useState(null);
-  const [editingNoteText, setEditingNoteText] = useState("");
 
   const token = sessionStorage.getItem("dynr_token");
 
   async function loadDashboardData() {
     setLoading(true);
     try {
-      const [meRes, guestsRes] = await Promise.all([
+      const [meRes, guestsRes, reservationsRes] = await Promise.all([
         fetch(`${API_URL}/api/member/me`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
         fetch(`${API_URL}/api/guests`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
+        fetch(`${API_URL}/api/reservations`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
       ]);
 
       const meData = await meRes.json();
       const guestsData = await guestsRes.json();
+      const reservationsData = await reservationsRes.json();
 
       if (meRes.ok) setRestaurant(meData.member);
       if (guestsRes.ok) setGuests(guestsData.guests || []);
+      if (reservationsRes.ok) setReservations(reservationsData.reservations || []);
     } catch (err) {
       console.error("Failed to load dashboard data:", err);
     } finally {
@@ -45,35 +49,28 @@ export default function Dashboard() {
     }
   }
 
-  useEffect(() => {
-    loadDashboardData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  async function loadGuestNotes(guestId) {
-    setNotesLoading(true);
+  async function handleReservationStatus(reservationId, status) {
     try {
-      const res = await fetch(`${API_URL}/api/guests/${guestId}/notes`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await fetch(`${API_URL}/api/reservations/${reservationId}/status`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ status }),
       });
-      const data = await res.json();
-      if (res.ok) setGuestNotes(data.notes || []);
+      if (res.ok) {
+        loadDashboardData();
+      }
     } catch (err) {
-      console.error("Failed to load notes:", err);
-    } finally {
-      setNotesLoading(false);
+      console.error("Failed to update reservation status:", err);
     }
   }
 
   useEffect(() => {
-    if (activeGuest) {
-      loadGuestNotes(activeGuest.id);
-      setEditingNoteId(null);
-    } else {
-      setGuestNotes([]);
-    }
+    loadDashboardData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeGuest?.id]);
+  }, []);
 
   function toggleSelect(id) {
     setSelected((prev) =>
@@ -120,38 +117,10 @@ export default function Dashboard() {
       if (res.ok) {
         setNoteText("");
         setShowNoteBox(false);
-        loadGuestNotes(guestId);
         loadDashboardData();
       }
     } catch (err) {
       console.error("Failed to add note:", err);
-    }
-  }
-
-  function startEditingNote(note) {
-    setEditingNoteId(note.id);
-    setEditingNoteText(note.note_text);
-  }
-
-  async function handleSaveEditedNote(guestId) {
-    if (!editingNoteText.trim()) return;
-    try {
-      const res = await fetch(`${API_URL}/api/guests/${guestId}/notes/${editingNoteId}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ noteText: editingNoteText }),
-      });
-      if (res.ok) {
-        setEditingNoteId(null);
-        setEditingNoteText("");
-        loadGuestNotes(guestId);
-        loadDashboardData();
-      }
-    } catch (err) {
-      console.error("Failed to edit note:", err);
     }
   }
 
@@ -189,6 +158,13 @@ export default function Dashboard() {
   const joinUrl = restaurantSlug
     ? `${window.location.origin}/join/${restaurantSlug}`
     : "";
+  const reserveUrl = restaurantSlug
+    ? `${window.location.origin}/table/${restaurantSlug}`
+    : "";
+
+  const pendingReservationCount = reservations.filter(
+    (r) => r.status === "pending"
+  ).length;
 
   const initials =
     restaurant?.restaurant_name
@@ -222,6 +198,17 @@ export default function Dashboard() {
               </button>
             )}
 
+            {restaurantSlug && (
+              <button
+                type="button"
+                className="dash-sidebar-btn"
+                style={{ width: "auto", padding: "10px 18px", marginBottom: 0 }}
+                onClick={() => setShowReservationLink(true)}
+              >
+                Reservation Link
+              </button>
+            )}
+
             <span>{restaurant?.restaurant_name || "..."}</span>
             <div className="dash-avatar">{initials}</div>
           </div>
@@ -229,90 +216,201 @@ export default function Dashboard() {
 
         <div className="dash-body">
           <div className="dash-main">
-            <h2>Guests</h2>
+            <h2>{view === "guests" ? "Guests" : "Reservations"}</h2>
             <p className="dash-subtitle">
-              {guests.length} members · {restaurant?.restaurant_name || ""}
+              {view === "guests"
+                ? `${guests.length} members · ${restaurant?.restaurant_name || ""}`
+                : `${reservations.length} reservations · ${restaurant?.restaurant_name || ""}`}
             </p>
 
-            <div className="dash-search-row">
-              <input
-                type="text"
-                placeholder="Search by name, phone, email, or membership number..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-              />
-              <button type="button">Search</button>
+            <div className="dash-tabs">
+              <button
+                type="button"
+                className={`dash-tab ${view === "guests" ? "is-active" : ""}`}
+                onClick={() => setView("guests")}
+              >
+                Guests
+              </button>
+              <button
+                type="button"
+                className={`dash-tab ${view === "reservations" ? "is-active" : ""}`}
+                onClick={() => setView("reservations")}
+              >
+                Reservations
+                {pendingReservationCount > 0 ? ` (${pendingReservationCount})` : ""}
+              </button>
             </div>
 
-            {selected.length > 0 && (
-              <div className="dash-selection-bar">
-                <span>{selected.length} guests selected</span>
-                <button type="button" onClick={() => setMessageTarget("bulk")}>
-                  ✉ Send email or message
-                </button>
-              </div>
+            {view === "guests" && (
+              <>
+                <div className="dash-search-row">
+                  <input
+                    type="text"
+                    placeholder="Search by name, phone, email, or membership number..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                  />
+                  <button type="button">Search</button>
+                </div>
+
+                {selected.length > 0 && (
+                  <div className="dash-selection-bar">
+                    <span>{selected.length} guests selected</span>
+                    <button type="button" onClick={() => setMessageTarget("bulk")}>
+                      ✉ Send email or message
+                    </button>
+                  </div>
+                )}
+
+                {loading ? (
+                  <div className="dash-table">
+                    <div className="dash-empty">Loading guests…</div>
+                  </div>
+                ) : filteredGuests.length === 0 ? (
+                  <div className="dash-table">
+                    <div className="dash-empty">
+                      {guests.length === 0
+                        ? "No guests yet. Once your QR sign-up page is live, guests will start showing up here."
+                        : "No guests match your search."}
+                    </div>
+                  </div>
+                ) : (
+                  <table className="dash-table">
+                    <thead>
+                      <tr>
+                        <th></th>
+                        <th>Name</th>
+                        <th>Visits</th>
+                        <th>Last Visit</th>
+                        <th>Notes</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredGuests.map((g) => (
+                        <tr
+                          key={g.id}
+                          className={selected.includes(g.id) ? "is-selected" : ""}
+                        >
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={selected.includes(g.id)}
+                              onChange={() => toggleSelect(g.id)}
+                            />
+                          </td>
+                          <td>
+                            <span
+                              className="dash-guest-name"
+                              onClick={() => setActiveGuest(g)}
+                              style={{ cursor: "pointer" }}
+                            >
+                              {g.name}
+                            </span>
+                          </td>
+                          <td>{g.visit_count ?? 0}</td>
+                          <td>{g.last_visit || "—"}</td>
+                          <td>
+                            {g.latest_note && (
+                              <span className="dash-tag is-accent">
+                                {g.latest_note.length > 24
+                                  ? g.latest_note.slice(0, 24) + "…"
+                                  : g.latest_note}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </>
             )}
 
-            {loading ? (
-              <div className="dash-table">
-                <div className="dash-empty">Loading guests…</div>
-              </div>
-            ) : filteredGuests.length === 0 ? (
-              <div className="dash-table">
-                <div className="dash-empty">
-                  {guests.length === 0
-                    ? "No guests yet. Once your QR sign-up page is live, guests will start showing up here."
-                    : "No guests match your search."}
-                </div>
-              </div>
-            ) : (
-              <table className="dash-table">
-                <thead>
-                  <tr>
-                    <th></th>
-                    <th>Name</th>
-                    <th>Visits</th>
-                    <th>Last Visit</th>
-                    <th>Notes</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredGuests.map((g) => (
-                    <tr
-                      key={g.id}
-                      className={selected.includes(g.id) ? "is-selected" : ""}
-                    >
-                      <td>
-                        <input
-                          type="checkbox"
-                          checked={selected.includes(g.id)}
-                          onChange={() => toggleSelect(g.id)}
-                        />
-                      </td>
-                      <td>
-                        <span
-                          className="dash-guest-name"
-                          onClick={() => setActiveGuest(g)}
-                          style={{ cursor: "pointer" }}
-                        >
-                          {g.name}
-                        </span>
-                      </td>
-                      <td>{g.visit_count ?? 0}</td>
-                      <td>{g.last_visit || "—"}</td>
-                      <td>
-                        {g.latest_note && (
-                          <span className="dash-tag is-accent">
-                            {g.latest_note.length > 24
-                              ? g.latest_note.slice(0, 24) + "…"
-                              : g.latest_note}
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            {view === "reservations" && (
+              <>
+                {loading ? (
+                  <div className="dash-table">
+                    <div className="dash-empty">Loading reservations…</div>
+                  </div>
+                ) : reservations.length === 0 ? (
+                  <div className="dash-table">
+                    <div className="dash-empty">
+                      No reservations yet. Share your reservation link and
+                      bookings will start showing up here.
+                    </div>
+                  </div>
+                ) : (
+                  <table className="dash-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Date &amp; Time</th>
+                        <th>Party</th>
+                        <th>Contact</th>
+                        <th>Status</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reservations.map((r) => (
+                        <tr key={r.id}>
+                          <td>
+                            <span className="dash-guest-name">{r.name}</span>
+                            {r.notes && (
+                              <div
+                                style={{
+                                  fontSize: 12,
+                                  color: "var(--muted)",
+                                  marginTop: 4,
+                                }}
+                              >
+                                {r.notes}
+                              </div>
+                            )}
+                          </td>
+                          <td>
+                            {r.reservation_date} · {r.reservation_time}
+                          </td>
+                          <td>{r.party_size}</td>
+                          <td>
+                            {r.phone}
+                            {r.email ? <div>{r.email}</div> : null}
+                          </td>
+                          <td>
+                            <span className={`dash-status-pill ${r.status}`}>
+                              {r.status}
+                            </span>
+                          </td>
+                          <td>
+                            <div className="dash-row-actions">
+                              {r.status !== "confirmed" && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleReservationStatus(r.id, "confirmed")
+                                  }
+                                >
+                                  Confirm
+                                </button>
+                              )}
+                              {r.status !== "cancelled" && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleReservationStatus(r.id, "cancelled")
+                                  }
+                                >
+                                  Cancel
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </>
             )}
           </div>
 
@@ -339,77 +437,8 @@ export default function Dashboard() {
                 </p>
 
                 <h4>Notes</h4>
-                <div className="dash-notes-box" style={{ display: "block", padding: 0, background: "none" }}>
-                  {notesLoading ? (
-                    <p style={{ padding: 12 }}>Loading notes…</p>
-                  ) : guestNotes.length === 0 ? (
-                    <p style={{ padding: 12 }}>No notes yet.</p>
-                  ) : (
-                    guestNotes.map((note) => (
-                      <div
-                        key={note.id}
-                        style={{
-                          padding: 10,
-                          marginBottom: 8,
-                          background: "#f7f5f2",
-                          borderRadius: 8,
-                        }}
-                      >
-                        {editingNoteId === note.id ? (
-                          <>
-                            <textarea
-                              className="dash-modal-textarea"
-                              value={editingNoteText}
-                              onChange={(e) => setEditingNoteText(e.target.value)}
-                              rows={3}
-                              style={{ width: "100%", marginBottom: 8 }}
-                            />
-                            <div style={{ display: "flex", gap: 8 }}>
-                              <button
-                                type="button"
-                                className="dash-sidebar-btn"
-                                style={{ width: "auto", padding: "6px 12px", marginBottom: 0 }}
-                                onClick={() => setEditingNoteId(null)}
-                              >
-                                Cancel
-                              </button>
-                              <button
-                                type="button"
-                                className="dash-sidebar-btn is-primary"
-                                style={{ width: "auto", padding: "6px 12px", marginBottom: 0 }}
-                                onClick={() => handleSaveEditedNote(activeGuest.id)}
-                              >
-                                Save
-                              </button>
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <p style={{ marginBottom: 6, whiteSpace: "pre-wrap" }}>{note.note_text}</p>
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                              <span style={{ fontSize: 12, opacity: 0.6 }}>
-                                {note.created_at?.slice(0, 10)}
-                              </span>
-                              <button
-                                type="button"
-                                style={{
-                                  background: "none",
-                                  border: "none",
-                                  cursor: "pointer",
-                                  fontSize: 12,
-                                  textDecoration: "underline",
-                                  opacity: 0.75,
-                                }}
-                                onClick={() => startEditingNote(note)}
-                              >
-                                Edit
-                              </button>
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    ))
-                  )}
+                <div className="dash-notes-box">
+                  {activeGuest.latest_note || "No notes yet."}
                 </div>
 
                 <h4>Visit history</h4>
@@ -459,6 +488,30 @@ export default function Dashboard() {
               type="button"
               className="dash-sidebar-btn"
               onClick={() => setShowQR(false)}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showReservationLink && (
+        <div
+          className="dash-modal-overlay"
+          onClick={() => setShowReservationLink(false)}
+        >
+          <div className="dash-modal" onClick={(e) => e.stopPropagation()}>
+            <img
+              src={`https://api.qrserver.com/v1/create-qr-code/?size=280x280&data=${encodeURIComponent(
+                reserveUrl
+              )}`}
+              alt="QR code for table reservations"
+            />
+            <p className="dash-modal-url">{reserveUrl}</p>
+            <button
+              type="button"
+              className="dash-sidebar-btn"
+              onClick={() => setShowReservationLink(false)}
             >
               Close
             </button>

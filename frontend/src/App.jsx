@@ -13,11 +13,11 @@ import AdminGate from "./components/AdminGate";
 import Membership from "./pages/Membership";
 import Dashboard from "./pages/Dashboard";
 import GuestJoin from "./pages/GuestJoin";
+import ReserveTable from "./pages/ReserveTable";
 import Settings from "./pages/Settings";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
-import GetStarted from "./pages/GetStarted";
-import AccountCreated from "./pages/AccountCreated";
+import FAQ from "./pages/FAQ";
 
 function SiteLayout({ children }) {
   return (
@@ -34,6 +34,7 @@ function App() {
     <Routes>
       {/* Standalone — no dynR navbar/footer, branded as the restaurant only */}
       <Route path="/join/:slug" element={<GuestJoin />} />
+      <Route path="/table/:slug" element={<ReserveTable />} />
 
       {/* Everything else keeps the normal site layout */}
       <Route
@@ -77,6 +78,14 @@ function App() {
         }
       />
       <Route
+        path="/faq"
+        element={
+          <SiteLayout>
+            <FAQ />
+          </SiteLayout>
+        }
+      />
+      <Route
         path="/login"
         element={
           <SiteLayout>
@@ -85,43 +94,21 @@ function App() {
         }
       />
       <Route
-  path="/forgot-password"
-  element={
-    <SiteLayout>
-      <ForgotPassword />
-    </SiteLayout>
-  }
-/>
-<Route
-  path="/reset-password"
-  element={
-    <SiteLayout>
-      <ResetPassword />
-    </SiteLayout>
-  }
-/>
-      <Route
-        path="/get-started"
+        path="/forgot-password"
         element={
           <SiteLayout>
-            <GetStarted />
+            <ForgotPassword />
           </SiteLayout>
         }
       />
       <Route
-        path="/account-created"
+        path="/reset-password"
         element={
           <SiteLayout>
-            <AccountCreated />
+            <ResetPassword />
           </SiteLayout>
         }
       />
-      {/*
-        Admin panel — deliberately NOT linked anywhere in the Navbar or
-        Footer. Only reachable by whoever you give this exact URL to.
-        Still fully protected by AdminGate (password) underneath — this
-        just keeps it from being stumbled on by the public.
-      */}
       <Route
         path="/dynr-team-portal"
         element={
@@ -141,13 +128,13 @@ function App() {
         }
       />
       <Route
-  path="/settings"
-  element={
-    <SiteLayout>
-      <Settings />
-    </SiteLayout>
-  }
-/>
+        path="/settings"
+        element={
+          <SiteLayout>
+            <Settings />
+          </SiteLayout>
+        }
+      />
     </Routes>
   );
 }
