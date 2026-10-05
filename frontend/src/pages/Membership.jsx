@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { API_URL } from "../api";
 
 const initialForm = {
@@ -6,14 +7,11 @@ const initialForm = {
   email: "",
   phone: "",
   password: "",
-  smtpHost: "",
-  smtpPort: "",
-  smtpUser: "",
-  smtpPass: "",
-  googleReviewUrl: "",
 };
 
 export default function Membership() {
+  const navigate = useNavigate();
+  const [openingId, setOpeningId] = useState(null);
   const [form, setForm] = useState(initialForm);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
@@ -23,7 +21,12 @@ export default function Membership() {
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState("");
   const [togglingId, setTogglingId] = useState(null);
-  const [deletingId, setDeletingId] = useState(null);
+
+  // Database login for a restaurant's folder — shown once after creating a
+  // restaurant, or after generating a new password.
+  const [dbInfo, setDbInfo] = useState(null);
+  const [resettingId, setResettingId] = useState(null);
+  const [copied, setCopied] = useState(false);
 
   const adminToken = sessionStorage.getItem("dynr_admin_token");
 
@@ -72,24 +75,71 @@ export default function Membership() {
     }
   }
 
-  async function deleteRestaurant(restaurant) {
-    const confirmed = window.confirm(
-      `Delete "${restaurant.restaurant_name}"? This permanently removes them and all of their guests, visits, and notes. This can't be undone.`
+  async function resetDbPassword(restaurant) {
+    const sure = window.confirm(
+      `Generate a new database password for ${restaurant.restaurant_name}'s folder? The old one will stop working.`
     );
-    if (!confirmed) return;
+    if (!sure) return;
 
-    setDeletingId(restaurant.id);
+    setResettingId(restaurant.id);
+    setListError("");
     try {
-      const res = await fetch(`${API_URL}/api/admin/restaurants/${restaurant.id}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${adminToken}` },
-      });
-      if (!res.ok) throw new Error();
-      setRestaurants((prev) => prev.filter((r) => r.id !== restaurant.id));
+      const res = await fetch(
+        `${API_URL}/api/admin/restaurants/${restaurant.id}/database-password`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to reset the password.");
+      setCopied(false);
+      setDbInfo({ name: restaurant.restaurant_name, ...data.database });
     } catch (err) {
-      setListError("Failed to delete restaurant. Please try again.");
+      setListError(err.message);
     } finally {
-      setDeletingId(null);
+      setResettingId(null);
+    }
+  }
+
+  // Signs this tab in as the restaurant (for 1 hour) and opens its dashboard.
+  // Your admin session stays in place, so you can come straight back here.
+  async function openDashboard(restaurant) {
+    setOpeningId(restaurant.id);
+    setListError("");
+    try {
+      const res = await fetch(
+        `${API_URL}/api/admin/restaurants/${restaurant.id}/open-dashboard`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Could not open the dashboard.");
+      sessionStorage.setItem("dynr_token", data.token);
+      navigate("/dashboard");
+    } catch (err) {
+      setListError(err.message);
+      setOpeningId(null);
+    }
+  }
+
+  async function copyDbInfo() {
+    if (!dbInfo) return;
+    const text = [
+      `Restaurant: ${dbInfo.name}`,
+      `Host: ${dbInfo.host || "—"}`,
+      `Database: ${dbInfo.database || "—"}`,
+      `Folder (schema): ${dbInfo.schema}`,
+      `Login: ${dbInfo.role}`,
+      `Password: ${dbInfo.password || "—"}`,
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+    } catch (err) {
+      // Clipboard not available — the details are still selectable on screen.
     }
   }
 
@@ -119,14 +169,16 @@ export default function Membership() {
         throw new Error(data?.error || "Something went wrong. Please try again.");
       }
 
-      if (!data.checkoutUrl) {
-        throw new Error("Account created, but no payment link came back. Please check billing setup.");
+      setSuccess(true);
+      if (data.database) {
+        setCopied(false);
+        setDbInfo({ name: form.restaurantName, ...data.database });
       }
-
-      // Account is created — now hand off to Stripe to complete payment
-      window.location.href = data.checkoutUrl;
+      setForm(initialForm);
+      loadRestaurants();
     } catch (err) {
       setError(err.message);
+    } finally {
       setLoading(false);
     }
   }
@@ -141,6 +193,47 @@ export default function Membership() {
 
         {listError && <div className="form-error">{listError}</div>}
 
+        {dbInfo && (
+          <div
+            className="form-error"
+            style={{
+              background: "#fff8e6",
+              color: "#5c4400",
+              borderColor: "#f0dca0",
+              marginBottom: "24px",
+            }}
+          >
+            <strong>Database login for {dbInfo.name}</strong>
+            <div style={{ margin: "6px 0 10px" }}>
+              Save this now — the password is shown only once. (You can always generate a
+              new one from the table below.)
+            </div>
+            <div
+              style={{
+                fontFamily: "monospace",
+                fontSize: "13px",
+                lineHeight: 1.7,
+                userSelect: "all",
+                wordBreak: "break-all",
+              }}
+            >
+              <div>Host: {dbInfo.host || "—"}</div>
+              <div>Database: {dbInfo.database || "—"}</div>
+              <div>Folder (schema): {dbInfo.schema}</div>
+              <div>Login: {dbInfo.role}</div>
+              <div>Password: {dbInfo.password || "— (unchanged)"}</div>
+            </div>
+            <div style={{ marginTop: "12px", display: "flex", gap: "8px" }}>
+              <button type="button" className="btn" onClick={copyDbInfo}>
+                {copied ? "Copied ✓" : "Copy details"}
+              </button>
+              <button type="button" className="btn" onClick={() => setDbInfo(null)}>
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+
         {listLoading ? (
           <p>Loading restaurants…</p>
         ) : restaurants.length === 0 ? (
@@ -153,15 +246,29 @@ export default function Membership() {
                 <th>Email</th>
                 <th>Phone</th>
                 <th>Registered</th>
-                <th>Sending</th>
+                <th>Welcome Email</th>
+                <th>Password</th>
+                <th>Database folder</th>
                 <th>Payment</th>
-                <th></th>
               </tr>
             </thead>
             <tbody>
               {restaurants.map((r) => (
                 <tr key={r.id}>
-                  <td>{r.restaurant_name}</td>
+                  <td>
+                    {r.restaurant_name}
+                    <div>
+                      <button
+                        type="button"
+                        className="dash-tag"
+                        style={{ cursor: "pointer", border: "none", marginTop: "6px" }}
+                        onClick={() => openDashboard(r)}
+                        disabled={openingId === r.id || !r.schema_name}
+                      >
+                        {openingId === r.id ? "Opening…" : "Open dashboard →"}
+                      </button>
+                    </div>
+                  </td>
                   <td>{r.email}</td>
                   <td>{r.phone || "—"}</td>
                   <td>{r.created_at?.slice(0, 10)}</td>
@@ -169,12 +276,46 @@ export default function Membership() {
                     <span
                       className="dash-tag"
                       style={{
-                        background: r.smtp_configured ? "#eaf7ec" : "#fdeceb",
-                        color: r.smtp_configured ? "#1e7a34" : "#b3261e",
+                        background: r.welcome_email_sent ? "#eaf7ec" : "#fdeceb",
+                        color: r.welcome_email_sent ? "#1e7a34" : "#b3261e",
                       }}
                     >
-                      {r.smtp_configured ? "SMTP set" : "Needs SMTP"}
+                      {r.welcome_email_sent ? "Sent" : "Failed"}
                     </span>
+                  </td>
+                  <td>
+                    {r.password_changed_at ? (
+                      <span
+                        className="dash-tag"
+                        style={{ background: "#eaf7ec", color: "#1e7a34" }}
+                      >
+                        Changed {r.password_changed_at.slice(0, 10)}
+                      </span>
+                    ) : (
+                      <span className="dash-tag" style={{ whiteSpace: "nowrap" }}>
+                        No change recorded
+                      </span>
+                    )}
+                  </td>
+                  <td>
+                    {r.schema_name ? (
+                      <>
+                        <div style={{ fontFamily: "monospace", fontSize: "12px" }}>
+                          {r.schema_name}
+                        </div>
+                        <button
+                          type="button"
+                          className="dash-tag"
+                          style={{ cursor: "pointer", border: "none", marginTop: "4px" }}
+                          onClick={() => resetDbPassword(r)}
+                          disabled={resettingId === r.id}
+                        >
+                          {resettingId === r.id ? "Working…" : "New DB password"}
+                        </button>
+                      </>
+                    ) : (
+                      "—"
+                    )}
                   </td>
                   <td>
                     <button
@@ -183,6 +324,7 @@ export default function Membership() {
                       style={{
                         cursor: "pointer",
                         border: "none",
+                        whiteSpace: "nowrap",
                         background: r.payment_status === "paid" ? "#eaf7ec" : "#fdeceb",
                         color: r.payment_status === "paid" ? "#1e7a34" : "#b3261e",
                       }}
@@ -193,23 +335,7 @@ export default function Membership() {
                         ? "Updating…"
                         : r.payment_status === "paid"
                         ? "Paid ✓"
-                        : "Unpaid — click to mark paid"}
-                    </button>
-                  </td>
-                  <td>
-                    <button
-                      type="button"
-                      className="dash-tag"
-                      style={{
-                        cursor: "pointer",
-                        border: "1px solid #f3c2bd",
-                        background: "#fff",
-                        color: "#b3261e",
-                      }}
-                      onClick={() => deleteRestaurant(r)}
-                      disabled={deletingId === r.id}
-                    >
-                      {deletingId === r.id ? "Deleting…" : "Delete"}
+                        : "Unpaid — mark paid"}
                     </button>
                   </td>
                 </tr>
@@ -220,10 +346,24 @@ export default function Membership() {
 
         <span className="eyebrow">Admin — Add Member Restaurant</span>
         <h1 style={{ marginTop: "14px", marginBottom: "32px" }}>
-          Set up a new restaurant
+          Create a restaurant account
         </h1>
 
         {error && <div className="form-error">{error}</div>}
+
+        {success && (
+          <div
+            className="form-error"
+            style={{
+              background: "#eaf7ec",
+              color: "#1e7a34",
+              borderColor: "#bfe6c8",
+            }}
+          >
+            Restaurant account created — a welcome email with their dashboard
+            login has been sent.
+          </div>
+        )}
 
         <form onSubmit={handleSubmit}>
           <div className="form-group">
@@ -278,76 +418,8 @@ export default function Membership() {
             />
           </div>
 
-          <h3 style={{ marginTop: "28px", marginBottom: "4px" }}>
-            Email (SMTP) — optional, can be added later in their Settings
-          </h3>
-          <p style={{ marginBottom: "16px", opacity: 0.8 }}>
-            Set this now so guest emails and visit follow-ups work immediately,
-            without the restaurant needing to log in and configure it themselves.
-          </p>
-
-          <div className="form-group">
-            <label htmlFor="smtpHost">SMTP Host</label>
-            <input
-              id="smtpHost"
-              name="smtpHost"
-              type="text"
-              placeholder="smtp.gmail.com"
-              value={form.smtpHost}
-              onChange={handleChange}
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="smtpPort">SMTP Port</label>
-            <input
-              id="smtpPort"
-              name="smtpPort"
-              type="text"
-              placeholder="587"
-              value={form.smtpPort}
-              onChange={handleChange}
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="smtpUser">Email Address</label>
-            <input
-              id="smtpUser"
-              name="smtpUser"
-              type="email"
-              placeholder="jane@restaurant.com"
-              value={form.smtpUser}
-              onChange={handleChange}
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="smtpPass">Email Password / App Password</label>
-            <input
-              id="smtpPass"
-              name="smtpPass"
-              type="password"
-              placeholder="16-character app password"
-              value={form.smtpPass}
-              onChange={handleChange}
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="googleReviewUrl">Google Review Link</label>
-            <input
-              id="googleReviewUrl"
-              name="googleReviewUrl"
-              type="url"
-              placeholder="https://g.page/r/..."
-              value={form.googleReviewUrl}
-              onChange={handleChange}
-            />
-          </div>
-
           <button type="submit" className="btn" disabled={loading}>
-            {loading ? "Redirecting to Stripe…" : "Set Up Payment Method"}
+            {loading ? "Creating account…" : "Create Account & Send Login"}
           </button>
         </form>
       </div>
