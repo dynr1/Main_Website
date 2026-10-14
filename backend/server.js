@@ -5,6 +5,7 @@ import rateLimit from 'express-rate-limit'
 import nodemailer from 'nodemailer'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
+import Stripe from 'stripe'
 import crypto from 'crypto'
 import db, {
   tenant,
@@ -29,6 +30,152 @@ process.on('uncaughtException', (err) => {
 const app = express()
 const PORT = process.env.PORT || 4000
 
+// ---------- Stripe: the £79/month membership ----------
+// Set STRIPE_SECRET_KEY, STRIPE_PRICE_ID and STRIPE_WEBHOOK_SECRET (see
+// .env.example). Without them the site still works; payment is just not offered.
+// Pinned on purpose: Stripe accounts with "Managed Payments" need API version
+// 2025-03-31.basil or newer, and an older installed Stripe package would otherwise
+// default to an older version.
+const STRIPE_API_VERSION = '2025-03-31.basil'
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY, {
+      apiVersion: STRIPE_API_VERSION,
+      ...(process.env.STRIPE_TEST_PORT
+        ? { host: '127.0.0.1', port: process.env.STRIPE_TEST_PORT, protocol: 'http' } // local testing only
+        : {}),
+    })
+  : null
+const stripeReady = () => Boolean(stripe && process.env.STRIPE_PRICE_ID)
+const APP_URL = () => process.env.APP_URL || 'https://dynr.co.uk'
+
+// Two months free: the card is collected now and Stripe charges £79 automatically
+// when the trial ends. A restaurant that has already had a subscription does not
+// get a second free trial.
+function trialEndsAt() {
+  const d = new Date()
+  d.setMonth(d.getMonth() + 2)
+  return Math.floor(d.getTime() / 1000)
+}
+
+async function createCheckoutUrl(member) {
+  const firstTime = !member.stripe_subscription_id
+  const session = await stripe.checkout.sessions.create({
+    mode: 'subscription',
+    line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
+    payment_method_collection: 'always',
+    // Re-use the Stripe customer if they already have one, otherwise pre-fill their email.
+    ...(member.stripe_customer_id
+      ? { customer: member.stripe_customer_id }
+      : { customer_email: member.email }),
+    client_reference_id: String(member.id),
+    metadata: { memberId: String(member.id) },
+    subscription_data: {
+      metadata: { memberId: String(member.id) },
+      ...(firstTime ? { trial_end: trialEndsAt() } : {}),
+    },
+    success_url: `${APP_URL()}/payment-success`,
+    cancel_url: `${APP_URL()}/payment-cancelled`,
+  })
+  return session.url
+}
+
+// The login email. For restaurants who sign up themselves it goes out once their
+// payment details are confirmed, and it does not repeat their password (they
+// chose it on the sign-up form, and we only ever store it scrambled).
+async function sendLoginEmailAfterPayment(memberId) {
+  // "Claim" the email first so a repeated Stripe event can't send it twice.
+  const claimed = await db
+    .prepare('UPDATE members SET welcome_email_sent = 1 WHERE id = ? AND welcome_email_sent = 0 RETURNING id')
+    .get(memberId)
+  if (!claimed) return
+
+  const m = await db.prepare('SELECT restaurant_name, email FROM members WHERE id = ?').get(memberId)
+  try {
+    await transporter.sendMail({
+      from: process.env.MAIL_FROM || '"dynR" <no-reply@dynr.co.uk>',
+      to: m.email,
+      bcc: 'abdul@dynr.co.uk',
+      subject: 'Your dynR dashboard is ready',
+      text: `Hi ${m.restaurant_name},
+
+Thank you — your payment details are confirmed and your 2-month free trial has started. Nothing is charged until the trial ends, then £79 per month is taken automatically. You can cancel any time from Settings in your dashboard.
+
+Your dashboard is ready. Here are your login details:
+
+Login page: ${APP_URL()}/login
+Email: ${m.email}
+Password: the password you chose when you registered
+
+Welcome aboard,
+The dynR team`,
+    })
+  } catch (mailErr) {
+    await db.prepare('UPDATE members SET welcome_email_sent = 0 WHERE id = ?').run(memberId)
+    console.error('Failed to send login email after payment:', mailErr)
+  }
+}
+
+// Stripe tells us when someone pays or cancels, so payment_status updates by itself.
+// This route needs the raw request body to verify the signature, so it must stay
+// ABOVE express.json().
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (!stripe || !process.env.STRIPE_WEBHOOK_SECRET) {
+    return res.status(503).send('Payments are not set up.')
+  }
+
+  let event
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      req.headers['stripe-signature'],
+      process.env.STRIPE_WEBHOOK_SECRET
+    )
+  } catch (err) {
+    console.error('Stripe webhook signature check failed:', err.message)
+    return res.status(400).send('Invalid signature.')
+  }
+
+  try {
+    const obj = event.data.object
+
+    if (event.type === 'checkout.session.completed') {
+      const memberId = Number(obj.client_reference_id || obj.metadata?.memberId)
+      if (memberId && obj.mode === 'subscription') {
+        await db
+          .prepare(
+            `UPDATE members SET payment_status = 'paid', stripe_customer_id = ?, stripe_subscription_id = ?
+             WHERE id = ?`
+          )
+          .run(obj.customer || null, obj.subscription || null, memberId)
+        console.log(`Stripe: restaurant #${memberId} paid.`)
+        void sendLoginEmailAfterPayment(memberId)
+      }
+    } else if (
+      event.type === 'customer.subscription.updated' ||
+      event.type === 'customer.subscription.deleted'
+    ) {
+      const memberId = Number(obj.metadata?.memberId)
+      const active = ['active', 'trialing', 'past_due'].includes(obj.status)
+      const status = event.type === 'customer.subscription.deleted' || !active ? 'unpaid' : 'paid'
+      if (memberId) {
+        await db.prepare('UPDATE members SET payment_status = ? WHERE id = ?').run(status, memberId)
+      } else if (obj.id) {
+        await db
+          .prepare('UPDATE members SET payment_status = ? WHERE stripe_subscription_id = ?')
+          .run(status, obj.id)
+      }
+      console.log(`Stripe: subscription ${obj.id} is now ${obj.status} -> ${status}.`)
+    }
+  } catch (err) {
+    console.error('Stripe webhook handling failed:', err)
+    return res.status(500).send('Webhook handling failed.') // Stripe will retry
+  }
+
+  return res.json({ received: true })
+})
+
+// Behind Render's proxy: lets rate limits see each visitor's real IP
+app.set('trust proxy', 1)
 app.use(cors())
 app.use(express.json())
 
@@ -41,6 +188,10 @@ const contactLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again later.' },
 })
 
+// If a mail server is slow or unreachable (e.g. a host that blocks SMTP ports),
+// give up after ~10s instead of hanging for minutes.
+const MAIL_TIMEOUTS = { connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 20000 }
+
 // Mail transport — configure via .env (see .env.example)
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -50,6 +201,7 @@ const transporter = nodemailer.createTransport({
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
+  ...MAIL_TIMEOUTS,
 })
 
 function isValidEmail(email) {
@@ -218,8 +370,40 @@ app.post('/api/admin/login', (req, res) => {
 })
 
 // ---------- Membership: Register a restaurant (admin only) ----------
-app.post('/api/register', requireAdmin, async (req, res) => {
-  const { restaurantName, email, phone, password } = req.body || {}
+// Anyone can register as a member from the public /register-as-member page.
+// A signed-in dynR admin can also use it; admins additionally get the new
+// folder's database login back (shown once). Public sign-ups never do.
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many sign-ups from this connection. Please try again later.' },
+})
+
+function isAdminRequest(req) {
+  const h = req.headers.authorization || ''
+  if (!h.startsWith('Bearer ')) return false
+  try {
+    return jwt.verify(h.slice(7), process.env.JWT_SECRET).role === 'admin'
+  } catch {
+    return false
+  }
+}
+
+app.post('/api/register', (req, res, next) => (isAdminRequest(req) ? next() : registerLimiter(req, res, next)), async (req, res) => {
+  const { restaurantName, email, phone, password, website } = req.body || {}
+  const isAdmin = isAdminRequest(req)
+
+  // Honeypot: real people never fill the hidden "website" field. Pretend success.
+  if (!isAdmin && website) return res.status(201).json({ ok: true })
+
+  if (typeof restaurantName !== 'string' || typeof email !== 'string' || typeof password !== 'string') {
+    return res.status(400).json({ error: 'Restaurant name, email, and password are required.' })
+  }
+  if (restaurantName.length > 120 || email.length > 200 || password.length > 200) {
+    return res.status(400).json({ error: 'One of the details is too long.' })
+  }
 
   if (!restaurantName || !email || !password) {
     return res.status(400).json({ error: 'Restaurant name, email, and password are required.' })
@@ -251,7 +435,12 @@ app.post('/api/register', requireAdmin, async (req, res) => {
       slug,
     })
 
-    // Email the restaurant their dashboard login details
+    // Email the restaurant their dashboard login details — in the background,
+    // so the sign-up page responds immediately even if the mail server is slow.
+    // Restaurants who sign up themselves get their login email once payment is
+    // confirmed (see the Stripe webhook). Accounts you create from the team portal,
+    // or any sign-up while Stripe isn't set up, get it straight away.
+    if (isAdmin || !stripeReady()) void (async () => {
     try {
       await transporter.sendMail({
         from: process.env.MAIL_FROM || '"dynR" <no-reply@dynr.co.uk>',
@@ -279,9 +468,26 @@ The dynR team`,
       // welcome_email_sent stays 0, which is what the admin list shows.
       console.error('Failed to send welcome email to restaurant:', mailErr)
     }
+    })()
 
     // The folder's database password is shown to the admin exactly once (it is
     // not stored anywhere readable — use "reset" to get a new one).
+    if (!isAdmin) {
+      // Send the new restaurant straight to the £79/month payment page.
+      let checkoutUrl = null
+      let paymentFailed = false
+      if (stripeReady()) {
+        try {
+          checkoutUrl = await createCheckoutUrl({ id: restaurantId, email })
+        } catch (payErr) {
+          // The account exists; they can still pay later from Settings.
+          paymentFailed = true
+          console.error('Could not start checkout for new restaurant:', payErr.message)
+        }
+      }
+      return res.status(201).json({ ok: true, checkoutUrl, paymentFailed })
+    }
+
     return res.status(201).json({
       ok: true,
       restaurantId,
@@ -333,6 +539,68 @@ app.put('/api/admin/restaurants/:id/payment', requireAdmin, async (req, res) => 
   await db.prepare('UPDATE members SET payment_status = ? WHERE id = ?').run(paymentStatus, req.params.id)
 
   return res.json({ ok: true })
+})
+
+// ---------- Billing: the restaurant's own subscription ----------
+app.get('/api/billing', requireAuth, async (req, res) => {
+  const m = await db
+    .prepare('SELECT payment_status, stripe_customer_id FROM members WHERE id = ?')
+    .get(req.memberId)
+  return res.json({
+    configured: stripeReady(),
+    paymentStatus: m?.payment_status || 'unpaid',
+    canManage: Boolean(m?.stripe_customer_id),
+  })
+})
+
+app.post('/api/billing/checkout', requireAuth, async (req, res) => {
+  if (!stripeReady()) return res.status(503).json({ error: 'Payments are not available yet.' })
+  const m = await db
+    .prepare('SELECT id, email, payment_status, stripe_customer_id, stripe_subscription_id FROM members WHERE id = ?')
+    .get(req.memberId)
+  if (!m) return res.status(404).json({ error: 'Restaurant not found.' })
+  if (m.payment_status === 'paid') return res.status(400).json({ error: 'Your membership is already active.' })
+  try {
+    return res.json({ url: await createCheckoutUrl(m) })
+  } catch (err) {
+    console.error('Checkout failed:', err.message)
+    return res.status(502).json({ error: 'Could not open the payment page. Please try again.' })
+  }
+})
+
+// Stripe's own page where they update their card or cancel.
+app.post('/api/billing/portal', requireAuth, async (req, res) => {
+  if (!stripeReady()) return res.status(503).json({ error: 'Payments are not available yet.' })
+  const m = await db.prepare('SELECT stripe_customer_id FROM members WHERE id = ?').get(req.memberId)
+  if (!m?.stripe_customer_id) {
+    return res.status(400).json({ error: 'No subscription found to manage.' })
+  }
+  try {
+    const session = await stripe.billingPortal.sessions.create({
+      customer: m.stripe_customer_id,
+      return_url: `${APP_URL()}/settings`,
+    })
+    return res.json({ url: session.url })
+  } catch (err) {
+    console.error('Billing portal failed:', err.message)
+    return res.status(502).json({ error: 'Could not open subscription settings. Please try again.' })
+  }
+})
+
+// Admin: get a payment link to send to a restaurant that has not paid yet.
+app.post('/api/admin/restaurants/:id/payment-link', requireAdmin, async (req, res) => {
+  if (!stripeReady()) return res.status(503).json({ error: 'Payments are not set up yet.' })
+  const m = await db
+    .prepare('SELECT id, email, stripe_customer_id, stripe_subscription_id FROM members WHERE id = ?')
+    .get(Number(req.params.id))
+  if (!m) return res.status(404).json({ error: 'Restaurant not found.' })
+  try {
+    return res.json({ ok: true, url: await createCheckoutUrl(m) })
+  } catch (err) {
+    console.error('Payment link failed:', err.message)
+    // Admin-only, so it's safe to show Stripe's own reason.
+    return res.status(502).json({ error: `Stripe could not create the payment link: ${err.message}` })
+  }
 })
 
 // ---------- Admin: Open a restaurant's dashboard as that restaurant ----------
@@ -423,6 +691,7 @@ app.post('/api/forgot-password', async (req, res) => {
 
   const resetUrl = `${process.env.APP_URL || 'https://dynr.co.uk'}/reset-password?token=${token}`
 
+  void (async () => {
   try {
     await transporter.sendMail({
       from: process.env.MAIL_FROM || '"dynR" <no-reply@dynr.co.uk>',
@@ -442,6 +711,7 @@ The dynR team`,
     console.error('Failed to send password reset email:', mailErr)
     // Still return the generic success response — don't reveal send failures to the caller.
   }
+  })()
 
   return res.json(genericResponse)
 })
@@ -544,7 +814,9 @@ app.post('/api/public/guests', async (req, res) => {
 
     // Send welcome email using the restaurant's own SMTP if they've set it up.
     // If not configured yet, skip silently — guest is still created either way.
+    // Sent in the background so the guest never waits on the mail server.
     if (restaurant.smtp_host && restaurant.smtp_user && restaurant.smtp_pass) {
+      void (async () => {
       try {
         const restaurantTransporter = nodemailer.createTransport({
           host: restaurant.smtp_host,
@@ -554,6 +826,7 @@ app.post('/api/public/guests', async (req, res) => {
             user: restaurant.smtp_user,
             pass: restaurant.smtp_pass,
           },
+          ...MAIL_TIMEOUTS,
         })
 
         const firstName = name.split(' ')[0]
@@ -583,6 +856,7 @@ The ${restaurant.restaurant_name} team`,
       } catch (mailErr) {
         console.error('Failed to send guest welcome email:', mailErr)
       }
+      })()
     }
 
     return res.status(201).json({ ok: true, membershipNumber })
@@ -634,13 +908,16 @@ app.post('/api/public/reservations', async (req, res) => {
     // Notify the restaurant of the new reservation, via their own SMTP.
     // If they haven't set it up yet, the reservation is still saved and
     // visible in their dashboard either way.
+    // Sent in the background so the guest's booking confirms instantly.
     if (restaurant.smtp_host && restaurant.smtp_user && restaurant.smtp_pass) {
+      void (async () => {
       try {
         const restaurantTransporter = nodemailer.createTransport({
           host: restaurant.smtp_host,
           port: Number(restaurant.smtp_port) || 587,
           secure: false,
           auth: { user: restaurant.smtp_user, pass: restaurant.smtp_pass },
+          ...MAIL_TIMEOUTS,
         })
 
         const notesLineText = notes ? `\nSpecial requests: ${notes}` : ''
@@ -679,6 +956,7 @@ This reservation is also saved in your dynR dashboard under Reservations.`,
       } catch (mailErr) {
         console.error('Failed to send reservation notification email:', mailErr)
       }
+      })()
     }
 
     return res.status(201).json({ ok: true, reservationId: result.lastInsertRowid })
@@ -821,6 +1099,7 @@ app.post('/api/guests/message', requireAuth, async (req, res) => {
         user: restaurant.smtp_user,
         pass: restaurant.smtp_pass,
       },
+      ...MAIL_TIMEOUTS,
     })
 
     for (const guest of guests) {
@@ -949,6 +1228,7 @@ async function sendDueScheduledEmails() {
             port: Number(restaurant.smtp_port) || 587,
             secure: false,
             auth: { user: restaurant.smtp_user, pass: restaurant.smtp_pass },
+            ...MAIL_TIMEOUTS,
           })
 
           const firstName = row.name.split(' ')[0]
@@ -1048,6 +1328,7 @@ async function sendBirthdayEmails() {
             port: Number(restaurant.smtp_port) || 587,
             secure: false,
             auth: { user: restaurant.smtp_user, pass: restaurant.smtp_pass },
+            ...MAIL_TIMEOUTS,
           })
 
           const firstName = row.name.split(' ')[0]

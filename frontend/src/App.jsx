@@ -10,7 +10,9 @@ import ForRestaurants from "./pages/ForRestaurants";
 import Contact from "./pages/Contact";
 import Login from "./pages/Login";
 import AdminGate from "./components/AdminGate";
-import Membership from "./pages/Membership";
+import DynRTeam from "./pages/dynR_team";
+import MembershipInfo from "./pages/MembershipInfo";
+import RegisterMember from "./pages/RegisterMember";
 import Dashboard from "./pages/Dashboard";
 import GuestJoin from "./pages/GuestJoin";
 import ReserveTable from "./pages/ReserveTable";
@@ -94,18 +96,34 @@ function App() {
         }
       />
       <Route
-        path="/forgot-password"
+  path="/forgot-password"
+  element={
+    <SiteLayout>
+      <ForgotPassword />
+    </SiteLayout>
+  }
+/>
+<Route
+  path="/reset-password"
+  element={
+    <SiteLayout>
+      <ResetPassword />
+    </SiteLayout>
+  }
+/>
+      <Route
+        path="/membership"
         element={
           <SiteLayout>
-            <ForgotPassword />
+            <MembershipInfo />
           </SiteLayout>
         }
       />
       <Route
-        path="/reset-password"
+        path="/register-as-member"
         element={
           <SiteLayout>
-            <ResetPassword />
+            <RegisterMember />
           </SiteLayout>
         }
       />
@@ -114,7 +132,7 @@ function App() {
         element={
           <SiteLayout>
             <AdminGate>
-              <Membership />
+              <DynRTeam />
             </AdminGate>
           </SiteLayout>
         }
@@ -128,13 +146,13 @@ function App() {
         }
       />
       <Route
-        path="/settings"
-        element={
-          <SiteLayout>
-            <Settings />
-          </SiteLayout>
-        }
-      />
+  path="/settings"
+  element={
+    <SiteLayout>
+      <Settings />
+    </SiteLayout>
+  }
+/>
     </Routes>
   );
 }

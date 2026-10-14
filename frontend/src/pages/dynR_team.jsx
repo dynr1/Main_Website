@@ -9,7 +9,7 @@ const initialForm = {
   password: "",
 };
 
-export default function Membership() {
+export default function DynRTeam() {
   const navigate = useNavigate();
   const [openingId, setOpeningId] = useState(null);
   const [form, setForm] = useState(initialForm);
@@ -27,6 +27,10 @@ export default function Membership() {
   const [dbInfo, setDbInfo] = useState(null);
   const [resettingId, setResettingId] = useState(null);
   const [copied, setCopied] = useState(false);
+
+  // Payment link for a restaurant that hasn't paid yet (to send to them).
+  const [payLink, setPayLink] = useState(null);
+  const [linkingId, setLinkingId] = useState(null);
 
   const adminToken = sessionStorage.getItem("dynr_admin_token");
 
@@ -122,6 +126,30 @@ export default function Membership() {
     } catch (err) {
       setListError(err.message);
       setOpeningId(null);
+    }
+  }
+
+  async function getPaymentLink(restaurant) {
+    setLinkingId(restaurant.id);
+    setListError("");
+    try {
+      const res = await fetch(
+        `${API_URL}/api/admin/restaurants/${restaurant.id}/payment-link`,
+        { method: "POST", headers: { Authorization: `Bearer ${adminToken}` } }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Could not create a payment link.");
+      setPayLink({ name: restaurant.restaurant_name, url: data.url, copied: false });
+      try {
+        await navigator.clipboard.writeText(data.url);
+        setPayLink({ name: restaurant.restaurant_name, url: data.url, copied: true });
+      } catch (err) {
+        // Clipboard not available — the link is still shown to copy by hand.
+      }
+    } catch (err) {
+      setListError(err.message);
+    } finally {
+      setLinkingId(null);
     }
   }
 
@@ -234,6 +262,34 @@ export default function Membership() {
           </div>
         )}
 
+        {payLink && (
+          <div
+            className="form-error"
+            style={{
+              background: "#eaf7ec",
+              color: "#1e7a34",
+              borderColor: "#bfe6c8",
+              marginBottom: "24px",
+            }}
+          >
+            <strong>
+              Payment link for {payLink.name}
+              {payLink.copied ? " — copied ✓" : ""}
+            </strong>
+            <div style={{ margin: "6px 0 10px" }}>
+              Send them this link to start their 2-month free trial (card details first, £79/month after). It opens Stripe's secure page.
+            </div>
+            <div style={{ fontFamily: "monospace", fontSize: "12px", userSelect: "all", wordBreak: "break-all" }}>
+              {payLink.url}
+            </div>
+            <div style={{ marginTop: "12px" }}>
+              <button type="button" className="btn" onClick={() => setPayLink(null)}>
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+
         {listLoading ? (
           <p>Loading restaurants…</p>
         ) : restaurants.length === 0 ? (
@@ -276,11 +332,16 @@ export default function Membership() {
                     <span
                       className="dash-tag"
                       style={{
-                        background: r.welcome_email_sent ? "#eaf7ec" : "#fdeceb",
-                        color: r.welcome_email_sent ? "#1e7a34" : "#b3261e",
+                        background: r.welcome_email_sent ? "#eaf7ec" : r.payment_status === "paid" ? "#fdeceb" : undefined,
+                        color: r.welcome_email_sent ? "#1e7a34" : r.payment_status === "paid" ? "#b3261e" : undefined,
+                        whiteSpace: "nowrap",
                       }}
                     >
-                      {r.welcome_email_sent ? "Sent" : "Failed"}
+                      {r.welcome_email_sent
+                        ? "Sent"
+                        : r.payment_status === "paid"
+                        ? "Failed"
+                        : "After payment"}
                     </span>
                   </td>
                   <td>
@@ -337,6 +398,19 @@ export default function Membership() {
                         ? "Paid ✓"
                         : "Unpaid — mark paid"}
                     </button>
+                    {r.payment_status !== "paid" && (
+                      <div>
+                        <button
+                          type="button"
+                          className="dash-tag"
+                          style={{ cursor: "pointer", border: "none", marginTop: "6px", whiteSpace: "nowrap" }}
+                          onClick={() => getPaymentLink(r)}
+                          disabled={linkingId === r.id}
+                        >
+                          {linkingId === r.id ? "Creating…" : "Get payment link"}
+                        </button>
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}
