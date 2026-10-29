@@ -192,6 +192,53 @@ const contactLimiter = rateLimit({
 // give up after ~10s instead of hanging for minutes.
 const MAIL_TIMEOUTS = { connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 20000 }
 
+// Builds the mail connection for a restaurant's OWN email account (never dynR's).
+// Port 465 needs an encrypted-from-the-start connection; 587 upgrades after connecting.
+// Gmail app passwords are shown with spaces ("abcd efgh ijkl mnop") - strip them.
+function makeRestaurantTransporter(r) {
+  const host = String(r.smtp_host || '').trim()
+  const port = Number(r.smtp_port) || 587
+  const user = String(r.smtp_user || '').trim()
+  let pass = String(r.smtp_pass || '')
+  if (/gmail|googlemail/i.test(host)) pass = pass.replace(/\s+/g, '')
+  return nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: { user, pass },
+    ...MAIL_TIMEOUTS,
+  })
+}
+
+// Turns a mail error into something a restaurant owner can act on.
+function explainMailError(err, host) {
+  const code = err?.code || ''
+  const msg = String(err?.message || '')
+  const h = String(host || '').toLowerCase()
+  if (code === 'EAUTH' || /535|534|auth/i.test(msg)) {
+    if (h.includes('gmail')) {
+      return "Gmail didn't accept that password. You need a Gmail App Password (16 letters), not your normal Gmail password. Follow the steps shown above to create one."
+    }
+    if (h.includes('yahoo')) {
+      return "Yahoo didn't accept that password. You need a Yahoo App Password, not your normal password. Follow the steps shown above."
+    }
+    if (h.includes('outlook') || h.includes('office365') || h.includes('hotmail') || h.includes('live.')) {
+      return "Microsoft didn't accept that password. Microsoft often blocks this kind of sign-in, especially for work accounts. A Gmail address is the easiest option if you have one."
+    }
+    return "The email provider didn't accept that email address and password. Check both, and use an app password if your provider offers one."
+  }
+  if (code === 'ETIMEDOUT' || code === 'ESOCKET' || code === 'ECONNECTION' || /timeout/i.test(msg)) {
+    return "We couldn't reach that mail server in time. Check the server name and port, then try again."
+  }
+  if (code === 'ENOTFOUND' || code === 'EDNS') {
+    return "That mail server name wasn't found. Check it for typos (for Gmail it is smtp.gmail.com)."
+  }
+  if (code === 'ECONNREFUSED') {
+    return "The mail server refused the connection. Check the port number (587 for most providers, 465 for Yahoo)."
+  }
+  return "We couldn't send the test email. Check your email address, password, server and port."
+}
+
 // Mail transport — configure via .env (see .env.example)
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -818,16 +865,7 @@ app.post('/api/public/guests', async (req, res) => {
     if (restaurant.smtp_host && restaurant.smtp_user && restaurant.smtp_pass) {
       void (async () => {
       try {
-        const restaurantTransporter = nodemailer.createTransport({
-          host: restaurant.smtp_host,
-          port: Number(restaurant.smtp_port) || 587,
-          secure: false,
-          auth: {
-            user: restaurant.smtp_user,
-            pass: restaurant.smtp_pass,
-          },
-          ...MAIL_TIMEOUTS,
-        })
+        const restaurantTransporter = makeRestaurantTransporter(restaurant)
 
         const firstName = name.split(' ')[0]
 
@@ -912,13 +950,7 @@ app.post('/api/public/reservations', async (req, res) => {
     if (restaurant.smtp_host && restaurant.smtp_user && restaurant.smtp_pass) {
       void (async () => {
       try {
-        const restaurantTransporter = nodemailer.createTransport({
-          host: restaurant.smtp_host,
-          port: Number(restaurant.smtp_port) || 587,
-          secure: false,
-          auth: { user: restaurant.smtp_user, pass: restaurant.smtp_pass },
-          ...MAIL_TIMEOUTS,
-        })
+        const restaurantTransporter = makeRestaurantTransporter(restaurant)
 
         const notesLineText = notes ? `\nSpecial requests: ${notes}` : ''
 
@@ -970,7 +1002,7 @@ This reservation is also saved in your dynR dashboard under Reservations.`,
 app.get('/api/reservations', requireAuth, async (req, res) => {
   const reservations = await req.tenant
     .prepare(
-      `SELECT id, name, email, phone, party_size, reservation_date, reservation_time, notes, status, created_at
+      `SELECT id, name, email, phone, party_size, reservation_date, reservation_time, notes, status, table_label, created_at
        FROM reservations
        ORDER BY reservation_date ASC, reservation_time ASC`
     )
@@ -983,8 +1015,10 @@ app.get('/api/reservations', requireAuth, async (req, res) => {
 app.put('/api/reservations/:id/status', requireAuth, async (req, res) => {
   const { status } = req.body || {}
 
-  if (!['pending', 'confirmed', 'cancelled'].includes(status)) {
-    return res.status(400).json({ error: "status must be 'pending', 'confirmed', or 'cancelled'." })
+  if (!['pending', 'confirmed', 'seated', 'completed', 'cancelled'].includes(status)) {
+    return res
+      .status(400)
+      .json({ error: "status must be 'pending', 'confirmed', 'seated', 'completed' or 'cancelled'." })
   }
 
   const existing = await req.tenant.prepare('SELECT id FROM reservations WHERE id = ?').get(req.params.id)
@@ -1008,6 +1042,9 @@ app.get('/api/guests', requireAuth, async (req, res) => {
         g.email,
         g.phone,
         g.membership_number,
+        g.birthday_day,
+        g.birthday_month,
+        g.unsubscribed_at,
         g.created_at,
         (SELECT COUNT(*)::int FROM visits WHERE guest_id = g.id) as visit_count,
         (SELECT visited_at FROM visits WHERE guest_id = g.id ORDER BY visited_at DESC LIMIT 1) as last_visit,
@@ -1028,20 +1065,97 @@ app.post('/api/guests/:id/visit', requireAuth, async (req, res) => {
     return res.status(404).json({ error: 'Guest not found.' })
   }
 
-  // Queue a "thanks for visiting" follow-up email for 1 hour from now.
-  // A background poller (see below) picks this up and sends it — using a
-  // DB row instead of setTimeout means it still gets sent even if the
-  // server restarts or redeploys in the meantime.
-  const sendAt = new Date(Date.now() + 60 * 60 * 1000).toISOString()
-
-  await req.tenant.transaction(async (t) => {
-    await t.prepare('INSERT INTO visits (guest_id) VALUES (?)').run(guest.id)
-    await t
-      .prepare('INSERT INTO scheduled_emails (guest_id, send_at, status) VALUES (?, ?, ?)')
-      .run(guest.id, sendAt, 'pending')
-  })
+  await recordVisit(req.tenant, guest.id)
 
   return res.json({ ok: true })
+})
+
+// Records a visit and queues the "thanks for visiting" follow-up email for 1 hour
+// from now. A background poller (see below) picks this up and sends it — using a
+// DB row instead of setTimeout means it still gets sent even if the server
+// restarts or redeploys in the meantime.
+async function recordVisit(folder, guestId) {
+  const sendAt = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+
+  await folder.transaction(async (t) => {
+    await t.prepare('INSERT INTO visits (guest_id) VALUES (?)').run(guestId)
+    await t
+      .prepare('INSERT INTO scheduled_emails (guest_id, send_at, status) VALUES (?, ?, ?)')
+      .run(guestId, sendAt, 'pending')
+  })
+}
+
+// ---------- Reservations: staff adds a booking from the dashboard ----------
+app.post('/api/reservations', requireAuth, async (req, res) => {
+  const { name, email, phone, partySize, reservationDate, reservationTime, notes } = req.body || {}
+
+  if (!name || !String(name).trim() || !partySize || !reservationDate || !reservationTime) {
+    return res.status(400).json({ error: 'Please add a name, party size, date and time.' })
+  }
+  if (email && !isValidEmail(email)) {
+    return res.status(400).json({ error: 'Please enter a valid email address.' })
+  }
+  const partySizeNum = Number(partySize)
+  if (!Number.isInteger(partySizeNum) || partySizeNum < 1 || partySizeNum > 30) {
+    return res.status(400).json({ error: 'Please enter a valid party size.' })
+  }
+
+  const result = await req.tenant
+    .prepare(
+      `INSERT INTO reservations (name, email, phone, party_size, reservation_date, reservation_time, notes, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'confirmed') RETURNING id`
+    )
+    .run(
+      String(name).trim(),
+      email ? String(email).trim() : null,
+      phone ? String(phone).trim() : '',
+      partySizeNum,
+      String(reservationDate),
+      String(reservationTime),
+      notes ? String(notes).trim() : null
+    )
+
+  return res.status(201).json({ ok: true, reservationId: result.lastInsertRowid })
+})
+
+// ---------- Reservations: set which table the party is on ----------
+app.put('/api/reservations/:id/table', requireAuth, async (req, res) => {
+  const label = String((req.body || {}).tableLabel || '').trim().slice(0, 20)
+  const existing = await req.tenant.prepare('SELECT id FROM reservations WHERE id = ?').get(req.params.id)
+  if (!existing) return res.status(404).json({ error: 'Reservation not found.' })
+
+  await req.tenant
+    .prepare('UPDATE reservations SET table_label = ? WHERE id = ?')
+    .run(label || null, req.params.id)
+
+  return res.json({ ok: true })
+})
+
+// ---------- Reservations: mark the visit as completed ----------
+// Sets the booking to "completed". If the booking matches a guest on your list
+// (same email, or same phone number), it also records a visit for them, which
+// queues their thank-you email.
+app.post('/api/reservations/:id/complete', requireAuth, async (req, res) => {
+  const reservation = await req.tenant
+    .prepare('SELECT id, email, phone, status FROM reservations WHERE id = ?')
+    .get(req.params.id)
+  if (!reservation) return res.status(404).json({ error: 'Reservation not found.' })
+  if (reservation.status === 'completed') return res.json({ ok: true, recorded: false })
+
+  let guest = null
+  if (reservation.email) {
+    guest = await req.tenant
+      .prepare('SELECT id FROM guests WHERE LOWER(email) = LOWER(?) LIMIT 1')
+      .get(reservation.email)
+  }
+  if (!guest && reservation.phone) {
+    guest = await req.tenant.prepare('SELECT id FROM guests WHERE phone = ? LIMIT 1').get(reservation.phone)
+  }
+
+  await req.tenant.prepare("UPDATE reservations SET status = 'completed' WHERE id = ?").run(reservation.id)
+  if (guest) await recordVisit(req.tenant, guest.id)
+
+  return res.json({ ok: true, recorded: Boolean(guest) })
 })
 
 // ---------- Guests: add a note ----------
@@ -1083,7 +1197,7 @@ app.post('/api/guests/message', requireAuth, async (req, res) => {
 
   const placeholders = guestIds.map(() => '?').join(',')
   const guests = await req.tenant
-    .prepare(`SELECT id, name, email FROM guests WHERE id IN (${placeholders})`)
+    .prepare(`SELECT id, name, email FROM guests WHERE id IN (${placeholders}) AND unsubscribed_at IS NULL`)
     .all(...guestIds)
 
   if (guests.length === 0) {
@@ -1091,16 +1205,7 @@ app.post('/api/guests/message', requireAuth, async (req, res) => {
   }
 
   try {
-    const restaurantTransporter = nodemailer.createTransport({
-      host: restaurant.smtp_host,
-      port: Number(restaurant.smtp_port) || 587,
-      secure: false,
-      auth: {
-        user: restaurant.smtp_user,
-        pass: restaurant.smtp_pass,
-      },
-      ...MAIL_TIMEOUTS,
-    })
+    const restaurantTransporter = makeRestaurantTransporter(restaurant)
 
     for (const guest of guests) {
       if (!guest.email) continue
@@ -1119,6 +1224,226 @@ app.post('/api/guests/message', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'Failed to send message. Please check your email settings.' })
   }
 })
+// ---------- Marketing ----------
+// Audiences are worked out here, on the server, so the numbers on screen and the
+// guests who actually receive a campaign always match.
+const AUDIENCES = [
+  { key: 'second_visit', label: 'Second-visit invitations', blurb: 'Guests with one recorded visit, 3 to 30 days ago' },
+  { key: 'regulars', label: 'Regulars to appreciate', blurb: '3 or more visits in the last 90 days' },
+  { key: 'reconnect', label: 'Time to reconnect', blurb: 'Visited before, not in the last 30 days, and no booking ahead' },
+  { key: 'new_members', label: 'New member welcomes', blurb: 'Joined in the last 7 days' },
+  { key: 'everyone', label: 'Everyone on your list', blurb: 'All guests with an email who have not unsubscribed' },
+]
+const MAX_CAMPAIGN_RECIPIENTS = 500
+
+const dbTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ')
+const unsubToken = (memberId, guestId) =>
+  crypto.createHmac('sha256', process.env.JWT_SECRET || 'dev').update(`unsub:${memberId}:${guestId}`).digest('hex').slice(0, 32)
+
+async function audienceMembers(folder) {
+  const now = Date.now()
+  const day = 86400000
+  const guests = await folder
+    .prepare(
+      `SELECT g.id, g.name, g.email, g.created_at, g.unsubscribed_at,
+         (SELECT COUNT(*)::int FROM visits v WHERE v.guest_id = g.id) AS visit_count,
+         (SELECT MAX(visited_at) FROM visits v WHERE v.guest_id = g.id) AS last_visit,
+         (SELECT COUNT(*)::int FROM visits v WHERE v.guest_id = g.id AND v.visited_at >= ?) AS visits_90,
+         EXISTS (
+           SELECT 1 FROM reservations r
+           WHERE r.reservation_date >= ? AND r.status <> 'cancelled'
+             AND ((g.email IS NOT NULL AND LOWER(r.email) = LOWER(g.email))
+               OR (g.phone IS NOT NULL AND g.phone <> '' AND r.phone = g.phone))
+         ) AS has_booking
+       FROM guests g
+       WHERE g.email IS NOT NULL AND g.email <> '' AND g.unsubscribed_at IS NULL`
+    )
+    .all(dbTime(new Date(now - 90 * day)), new Date(now).toISOString().slice(0, 10))
+
+  const daysSince = (t) => (t ? (now - new Date(String(t).replace(' ', 'T') + 'Z').getTime()) / day : null)
+  const out = Object.fromEntries(AUDIENCES.map((a) => [a.key, []]))
+  for (const g of guests) {
+    const d = daysSince(g.last_visit)
+    const joined = daysSince(g.created_at)
+    out.everyone.push(g)
+    if (g.visit_count === 1 && d != null && d >= 3 && d <= 30) out.second_visit.push(g)
+    if (g.visits_90 >= 3) out.regulars.push(g)
+    if (g.visit_count >= 1 && d != null && d >= 30 && !g.has_booking) out.reconnect.push(g)
+    if (joined != null && joined < 7) out.new_members.push(g)
+  }
+  return out
+}
+
+app.get('/api/marketing/overview', requireAuth, async (req, res) => {
+  const members = await audienceMembers(req.tenant)
+  const restaurant = await db.prepare('SELECT smtp_host, smtp_user, smtp_pass, google_review_url FROM members WHERE id = ?').get(req.memberId)
+
+  const campaigns = await req.tenant
+    .prepare('SELECT id, name, audience, subject, recipients_count, sent_count, status, created_at FROM campaigns ORDER BY id DESC LIMIT 20')
+    .all()
+
+  const queue = await req.tenant
+    .prepare(
+      `SELECT se.id, se.send_at, se.status, g.name
+       FROM scheduled_emails se JOIN guests g ON g.id = se.guest_id
+       ORDER BY se.id DESC LIMIT 12`
+    )
+    .all()
+
+  return res.json({
+    audiences: AUDIENCES.map((a) => ({ ...a, count: members[a.key].length })),
+    campaigns,
+    queue,
+    emailReady: Boolean(restaurant?.smtp_host && restaurant?.smtp_user && restaurant?.smtp_pass),
+    reviewLinkSet: Boolean(restaurant?.google_review_url),
+  })
+})
+
+const campaignLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'You have sent several campaigns in the last hour. Please wait a little before sending another.' },
+})
+
+app.post('/api/marketing/campaigns', requireAuth, campaignLimiter, async (req, res) => {
+  const { audience, subject, message, name } = req.body || {}
+
+  if (!AUDIENCES.some((a) => a.key === audience)) {
+    return res.status(400).json({ error: 'Please choose who this is for.' })
+  }
+  const cleanSubject = String(subject || '').trim()
+  const cleanMessage = String(message || '').trim()
+  if (!cleanSubject || !cleanMessage) {
+    return res.status(400).json({ error: 'Please add a subject and a message.' })
+  }
+  if (cleanSubject.length > 150 || cleanMessage.length > 5000) {
+    return res.status(400).json({ error: 'That subject or message is too long.' })
+  }
+
+  const restaurant = await db.prepare('SELECT * FROM members WHERE id = ?').get(req.memberId)
+  if (!restaurant.smtp_host || !restaurant.smtp_user || !restaurant.smtp_pass) {
+    return res.status(400).json({ error: 'Please set up your email in Settings before sending a campaign.' })
+  }
+
+  const busy = await req.tenant.prepare("SELECT id FROM campaigns WHERE status = 'sending' LIMIT 1").get()
+  if (busy) {
+    return res.status(409).json({ error: 'Another campaign is still sending. Please wait for it to finish.' })
+  }
+
+  const recipients = (await audienceMembers(req.tenant))[audience]
+  if (recipients.length === 0) {
+    return res.status(400).json({ error: 'There is nobody in this group right now.' })
+  }
+  if (recipients.length > MAX_CAMPAIGN_RECIPIENTS) {
+    return res.status(400).json({ error: `This group has more than ${MAX_CAMPAIGN_RECIPIENTS} guests. Please contact us to send to a list this size.` })
+  }
+
+  const label = AUDIENCES.find((a) => a.key === audience).label
+  const created = await req.tenant
+    .prepare('INSERT INTO campaigns (name, audience, subject, body, recipients_count) VALUES (?, ?, ?, ?, ?) RETURNING id')
+    .run(String(name || cleanSubject).slice(0, 120), audience, cleanSubject, cleanMessage, recipients.length)
+  const campaignId = created.lastInsertRowid
+  const folder = req.tenant
+
+  // Send in the background so the page doesn't wait on a slow mail server.
+  void (async () => {
+    let sent = 0
+    try {
+      const transporter = makeRestaurantTransporter(restaurant)
+      for (const g of recipients) {
+        const first = String(g.name || '').split(' ')[0] || 'there'
+        const body = cleanMessage.replace(/\{first_name\}/gi, first)
+        const link = `${APP_URL()}/unsubscribe?r=${encodeURIComponent(restaurant.slug)}&g=${g.id}&t=${unsubToken(restaurant.id, g.id)}`
+        try {
+          await transporter.sendMail({
+            from: restaurant.smtp_user,
+            to: g.email,
+            subject: cleanSubject.replace(/\{first_name\}/gi, first),
+            text: `${body}\n\nWarmly,\n${restaurant.restaurant_name}\n\n--\nYou are receiving this because you joined the guest list at ${restaurant.restaurant_name}.\nTo stop receiving these emails: ${link}`,
+            headers: { 'List-Unsubscribe': `<${link}>` },
+          })
+          sent += 1
+        } catch (err) {
+          console.error(`Campaign ${campaignId}: failed to email guest ${g.id}:`, err.message)
+        }
+        if (sent % 5 === 0) {
+          await folder.prepare('UPDATE campaigns SET sent_count = ? WHERE id = ?').run(sent, campaignId)
+        }
+      }
+    } catch (err) {
+      console.error(`Campaign ${campaignId} failed:`, err)
+    }
+    const status = sent === recipients.length ? 'sent' : sent === 0 ? 'failed' : 'partly sent'
+    try {
+      await folder.prepare('UPDATE campaigns SET sent_count = ?, status = ? WHERE id = ?').run(sent, status, campaignId)
+    } catch (err) {
+      console.error(`Campaign ${campaignId}: could not save final status:`, err)
+    }
+  })()
+
+  return res.status(202).json({ ok: true, campaignId, recipients: recipients.length })
+})
+
+// Guests click the link at the bottom of a campaign email. The page asks them to confirm, then calls this.
+app.post('/api/public/unsubscribe', async (req, res) => {
+  const { slug, guestId, token } = req.body || {}
+  const gid = Number(guestId)
+  if (!slug || !Number.isInteger(gid) || !token) {
+    return res.status(400).json({ error: 'This link is not valid.' })
+  }
+
+  const restaurant = await db.prepare('SELECT * FROM members WHERE slug = ?').get(slug)
+  if (!restaurant) return res.status(404).json({ error: 'This link is not valid.' })
+
+  const expected = unsubToken(restaurant.id, gid)
+  const given = String(token)
+  const ok = given.length === expected.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected))
+  if (!ok) return res.status(400).json({ error: 'This link is not valid.' })
+
+  await tenant(restaurant)
+    .prepare('UPDATE guests SET unsubscribed_at = ? WHERE id = ? AND unsubscribed_at IS NULL')
+    .run(dbTime(new Date()), gid)
+
+  return res.json({ ok: true, restaurantName: restaurant.restaurant_name })
+})
+
+// ---------- Settings: send a test email using the details in the form ----------
+const testEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 12,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many test emails. Please wait a few minutes and try again.' },
+})
+
+app.post('/api/settings/test-email', requireAuth, testEmailLimiter, async (req, res) => {
+  const { smtpHost, smtpPort, smtpUser, smtpPass } = req.body || {}
+  if (!smtpHost || !smtpUser || !smtpPass) {
+    return res.status(400).json({ error: 'Fill in your email address, password and mail server first.' })
+  }
+  if (!isValidEmail(String(smtpUser).trim())) {
+    return res.status(400).json({ error: 'Your email address does not look right.' })
+  }
+
+  const creds = { smtp_host: smtpHost, smtp_port: smtpPort, smtp_user: smtpUser, smtp_pass: smtpPass }
+  try {
+    const t = makeRestaurantTransporter(creds)
+    // Sent to the restaurant's own address, from its own address - nobody else is emailed.
+    await t.sendMail({
+      from: String(smtpUser).trim(),
+      to: String(smtpUser).trim(),
+      subject: 'Test email from your dynR dashboard',
+      text: 'Your email is connected. Guests will now receive welcome emails, visit follow-ups and messages from this address.\n\nYou can ignore this email.',
+    })
+    return res.json({ ok: true, sentTo: String(smtpUser).trim() })
+  } catch (err) {
+    console.error('Settings test email failed:', err.code || '', err.message)
+    return res.status(400).json({ error: explainMailError(err, smtpHost) })
+  }
+})
+
 // ---------- Settings: Get current restaurant settings ----------
 app.get('/api/settings', requireAuth, async (req, res) => {
   const member = await db
@@ -1144,9 +1469,9 @@ app.put('/api/settings', requireAuth, async (req, res) => {
        SET smtp_host = ?, smtp_port = ?, smtp_user = ?, smtp_pass = ?, google_review_url = ?
        WHERE id = ?`
     ).run(
-      smtpHost || null,
-      smtpPort || null,
-      smtpUser || null,
+      (smtpHost && String(smtpHost).trim()) || null,
+      (smtpPort && String(smtpPort).trim()) || null,
+      (smtpUser && String(smtpUser).trim()) || null,
       smtpPass || null,
       googleReviewUrl || null,
       req.memberId
@@ -1223,13 +1548,7 @@ async function sendDueScheduledEmails() {
         }
 
         try {
-          const restaurantTransporter = nodemailer.createTransport({
-            host: restaurant.smtp_host,
-            port: Number(restaurant.smtp_port) || 587,
-            secure: false,
-            auth: { user: restaurant.smtp_user, pass: restaurant.smtp_pass },
-            ...MAIL_TIMEOUTS,
-          })
+          const restaurantTransporter = makeRestaurantTransporter(restaurant)
 
           const firstName = row.name.split(' ')[0]
 
@@ -1323,13 +1642,7 @@ async function sendBirthdayEmails() {
         }
 
         try {
-          const restaurantTransporter = nodemailer.createTransport({
-            host: restaurant.smtp_host,
-            port: Number(restaurant.smtp_port) || 587,
-            secure: false,
-            auth: { user: restaurant.smtp_user, pass: restaurant.smtp_pass },
-            ...MAIL_TIMEOUTS,
-          })
+          const restaurantTransporter = makeRestaurantTransporter(restaurant)
 
           const firstName = row.name.split(' ')[0]
 

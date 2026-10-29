@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 
 const faqs = [
   {
@@ -30,8 +31,12 @@ const faqs = [
     a: "Your guest list is private to your restaurant — only your dashboard login can see it. We don't share, sell, or use your guest data for anything else.",
   },
   {
+    q: "How much does it cost?",
+    a: "£79 a month, with your first 2 months free. You add your card when you register, nothing is charged for two months, and then £79 is taken automatically each month. You can cancel any time from Settings in your dashboard.",
+  },
+  {
     q: "How do I get started?",
-    a: "Get in touch through the Contact page for a free 15-minute chat. We'll set your restaurant up with a dashboard login and walk you through generating your first QR code.",
+    a: "Press “Become a member”, fill in your restaurant's details and add your card. Your dashboard is created straight away and your login details are emailed to you once your card is confirmed. If you'd like to talk first, book a free 15-minute chat on the Contact page.",
   },
 ];
 
@@ -41,14 +46,13 @@ export default function FAQ() {
   return (
     <section>
       <div className="container center-block">
-        <span className="eyebrow">FAQ</span>
         <h1>Frequently asked questions</h1>
         <p style={{ marginTop: "24px" }}>
           Everything you need to know about how dynR works. Can't find your
           answer here?{" "}
-          <a href="/contact" className="link-cta">
+          <Link to="/contact" className="link-cta">
             Get in touch
-          </a>
+          </Link>
           .
         </p>
       </div>

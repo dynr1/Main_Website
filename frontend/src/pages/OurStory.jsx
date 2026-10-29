@@ -6,8 +6,7 @@ export default function OurStory() {
     <>
       <section>
         <div className="container center-block">
-          <span className="eyebrow">Our story</span>
-          <h1>We got tired of losing guests. So we decided to fix it.</h1>
+                    <h1>We got tired of losing guests. So we decided to fix it.</h1>
         </div>
       </section>
 
@@ -54,9 +53,14 @@ export default function OurStory() {
           <p style={{ fontSize: "22px", color: "var(--ink)" }}>
             If any of this sounds familiar, let's talk.
           </p>
-          <a href="/contact" className="link-cta">
-            Book a 15-Minute Chat
-          </a>
+          <div className="hero-actions" style={{ justifyContent: "center" }}>
+            <Link to="/register-as-member" className="btn">
+              Become a member
+            </Link>
+            <Link to="/contact" className="btn btn-ghost">
+              Book a 15-minute chat
+            </Link>
+          </div>
         </div>
       </section>
     </>

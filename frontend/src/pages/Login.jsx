@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { API_URL } from "../api";
 
 export default function Login() {
@@ -40,12 +40,11 @@ export default function Login() {
   }
 
   return (
-    <section>
-      <div className="container content-block">
-        <span className="eyebrow">Restaurant Sign In</span>
-        <h1 style={{ marginTop: "14px", marginBottom: "32px" }}>
-          Welcome back
-        </h1>
+    <section className="auth-page">
+      <div className="container">
+        <div className="auth-card auth-card--narrow">
+        <h1>Sign in</h1>
+        <p className="auth-sub">Welcome back. Sign in to your restaurant's dashboard.</p>
 
         {error && <div className="form-error">{error}</div>}
 
@@ -80,9 +79,13 @@ export default function Login() {
             {loading ? "Signing in…" : "Sign In"}
           </button>
         </form>
-        <p style={{ marginTop: "16px" }}>
-  <a href="/forgot-password">Forgot password?</a>
-</p>
+        <p className="auth-links">
+          <Link to="/forgot-password">Forgot password?</Link>
+        </p>
+        </div>
+        <p className="auth-foot">
+          New to dynR? <Link to="/membership">See how membership works</Link>
+        </p>
       </div>
     </section>
   );

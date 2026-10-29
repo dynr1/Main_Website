@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { API_URL } from "../api";
 
 const initialForm = {
@@ -47,18 +48,38 @@ export default function Contact() {
 
   return (
     <>
-      <section>
-        <div className="container center-block">
-          <h1>Let's talk</h1>
-          <p>
-            Tell us a bit about your restaurant and we'll be in touch within
-            a day
-          </p>
-        </div>
-      </section>
+      <section className="contact-page">
+        <div className="container contact-grid">
+          <div className="contact-copy">
+            <h1>Let's talk</h1>
+            <p className="hero-lede">
+              Tell us a bit about your restaurant and we'll be in touch within
+              a day.
+            </p>
 
-      <section style={{ paddingTop: 0 }}>
-        <div className="container content-block">
+            <dl className="contact-facts">
+              <div>
+                <dt>Email</dt>
+                <dd>
+                  <a href="mailto:hello@dynr.co.uk">hello@dynr.co.uk</a>
+                </dd>
+              </div>
+              <div>
+                <dt>What to expect</dt>
+                <dd>A free 15-minute chat. No pitch, no pressure.</dd>
+              </div>
+              <div>
+                <dt>Ready to start now?</dt>
+                <dd>
+                  <Link to="/register-as-member" className="link-cta">
+                    Become a member
+                  </Link>
+                </dd>
+              </div>
+            </dl>
+          </div>
+
+          <div className="auth-card">
           <form onSubmit={handleSubmit}>
             <div className="form-group">
               <label htmlFor="name">Name</label>
@@ -133,6 +154,7 @@ export default function Contact() {
               <p style={{ color: "#b3261e", marginTop: "16px" }}>{errorMsg}</p>
             )}
           </form>
+          </div>
         </div>
       </section>
     </>

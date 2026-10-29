@@ -1,3 +1,5 @@
+import { Link } from "react-router-dom";
+
 export default function WhatWeDo() {
   return (
     <>
@@ -64,9 +66,14 @@ export default function WhatWeDo() {
           <h2 style={{ color: "#fff" }}>
             Free 15-minute chat. No pitch, no pressure.
           </h2>
-          <a href="/contact" className="btn" style={{ marginTop: "28px" }}>
-            Book a 15-Minute Chat
-          </a>
+          <div className="hero-actions" style={{ justifyContent: "center", marginTop: "28px" }}>
+            <Link to="/register-as-member" className="btn">
+              Become a member
+            </Link>
+            <Link to="/contact" className="btn btn-ghost btn-ghost--light">
+              Book a 15-minute chat
+            </Link>
+          </div>
         </div>
       </section>
     </>

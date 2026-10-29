@@ -175,6 +175,21 @@ function folderTablesDdl(schema) {
       status TEXT NOT NULL DEFAULT 'pending',
       created_at TEXT NOT NULL DEFAULT ${NOW_UTC}
     )`,
+    // Added later: which table the party is on. Safe to run on existing folders.
+    `ALTER TABLE ${schema}.reservations ADD COLUMN IF NOT EXISTS table_label TEXT`,
+    // Marketing: guests who opt out of campaign emails, and the campaigns sent.
+    `ALTER TABLE ${schema}.guests ADD COLUMN IF NOT EXISTS unsubscribed_at TEXT`,
+    `CREATE TABLE IF NOT EXISTS ${schema}.campaigns (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      audience TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      body TEXT NOT NULL,
+      recipients_count INTEGER NOT NULL DEFAULT 0,
+      sent_count INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'sending',
+      created_at TEXT NOT NULL DEFAULT ${NOW_UTC}
+    )`,
   ]
 }
 
