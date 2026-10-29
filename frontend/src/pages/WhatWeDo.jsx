@@ -1,81 +1,106 @@
 import { Link } from "react-router-dom";
+import { FinalCta } from "../components/PageBits";
+
+const FEATURES = [
+  {
+    t: "QR guest signups",
+    d: "Give guests a simple way to join your guest list. One scan, with no app to download.",
+    ex: { h: "A simple invitation", q: "“Stay in touch with us.”", p: "Place your QR code where guests can find it, and let them choose to join." },
+  },
+  {
+    t: "Guest profiles",
+    d: "Keep visits, preferences and notes together so your whole team can offer a more personal welcome.",
+    ex: { h: "A familiar welcome", q: "“Alex prefers the window table.”", p: "A useful note makes it easier for the next team member to offer the same thoughtful service." },
+  },
+  {
+    t: "Google review invitations",
+    d: "Help guests share an honest review. Make it easier for future diners to hear about their experience.",
+    ex: { h: "An honest invitation", q: "“How was your visit? Share your experience on Google.”", p: "Invite feedback without asking for a particular rating." },
+  },
+  {
+    t: "Direct reservations",
+    d: "Give guests your own booking page, with reservations arriving in your dashboard.",
+    ex: { h: "An easy next step", q: "“Book your next visit.”", p: "Give guests a direct route to your own reservation page." },
+  },
+  {
+    t: "Automatic follow-ups",
+    d: "Keep the connection going with post-visit thank-yous and birthday messages from your own email address.",
+    ex: { h: "A thoughtful follow-up", q: "“Thank you for dining with us.”", p: "Continue the relationship from your restaurant’s own email address." },
+  },
+  {
+    t: "Your own private space",
+    d: "Keep your restaurant’s guest information separate from other restaurants.",
+    ex: { h: "Your restaurant, your space", q: "Private to your restaurant.", p: "Guest information stays separate from other restaurants, ready for your team to use." },
+  },
+];
+
+const STEPS = [
+  { t: "Join dynR", d: "Add your restaurant details and card. Nothing is charged for two months." },
+  { t: "Make it yours", d: "Get your login by email and configure your email settings." },
+  { t: "Invite your guests", d: "Print your QR code and put it where guests can easily find it." },
+  { t: "Build the relationship", d: "Get to know your guests, welcome bookings and keep in touch." },
+];
 
 export default function WhatWeDo() {
   return (
-    <>
-      <section>
-        <div className="container center-block">
-          <span className="eyebrow">What we do</span>
+    <div className="hm">
+      <section className="hm-page-hero">
+        <div className="hm-wrap">
+          <p className="hm-eyebrow">The platform</p>
           <h1>
-            Service is getting faster.
+            Less to remember.
             <br />
-            Hospitality is getting lost.
+            <span>More to recognise.</span>
           </h1>
-          <p style={{ marginTop: "24px" }}>
-            Everywhere you look, the industry is optimising for speed — faster
-            ordering, faster tables turned, faster everything. Efficient, but
-            rarely personal. Somewhere in that shift, hospitality quietly
-            became service — and guests can tell the difference, even if they
-            can't always name it.
+          <p className="hm-lead">
+            Keep the details that matter close to your team. From a guest’s first scan to their next reservation, dynR helps you carry
+            good hospitality beyond the table.
           </p>
         </div>
       </section>
 
-      <section className="section-alt">
-        <div className="container content-block wide">
+      <section className="hm-section hm-section-tight">
+        <div className="hm-wrap">
+          {FEATURES.map((f) => (
+            <div key={f.t} className="hm-row">
+              <div>
+                <h2 className="hm-h3-lg">{f.t}</h2>
+                <p className="hm-lead hm-lead-sm">{f.d}</p>
+              </div>
+              <div className="hm-ex">
+                <small>Illustrative example</small>
+                <h3>{f.ex.h}</h3>
+                <p className="hm-ex-q">{f.ex.q}</p>
+                <p>{f.ex.p}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="hm-tint">
+        <div className="hm-wrap">
           <h2>
-            We help independent restaurants turn first-time guests into
-            regulars.
+            A few steps.
+            <br />
+            A more connected service.
           </h2>
-          <p style={{ marginTop: "24px" }}>
-            A guest becomes a member in seconds. From then on, every visit,
-            any member of staff can see who they are, what they like, and
-            what matters to them — automatically. Not a screen replacing a
-            conversation. Just enough, quietly, in the background, so
-            hospitality doesn't depend on which staff member happens to
-            remember.
+          <ol className="hm-steps">
+            {STEPS.map((s, i) => (
+              <li key={s.t}>
+                <small>{String(i + 1).padStart(2, "0")}</small>
+                <h3>{s.t}</h3>
+                <p>{s.d}</p>
+              </li>
+            ))}
+          </ol>
+          <p className="hm-more">
+            Prefer to talk it through? <Link to="/contact">Request a 15-minute chat</Link>
           </p>
         </div>
       </section>
 
-      <section>
-        <div className="container center-block">
-          <h2>Why this matters</h2>
-          <div className="stat-number" style={{ marginTop: "32px" }}>
-            5x
-          </div>
-          <div className="bars">
-            <div className="bar-col">
-              <div className="bar tall"></div>
-              <div className="bar-label">New customer</div>
-            </div>
-            <div className="bar-col">
-              <div className="bar short"></div>
-              <div className="bar-label">Returning customer</div>
-            </div>
-          </div>
-          <p>
-            Studies show it costs roughly 5 times more to win a new customer
-            than to keep one you already have.
-          </p>
-        </div>
-      </section>
-
-      <section className="section-dark">
-        <div className="container center-block">
-          <h2 style={{ color: "#fff" }}>
-            Free 15-minute chat. No pitch, no pressure.
-          </h2>
-          <div className="hero-actions" style={{ justifyContent: "center", marginTop: "28px" }}>
-            <Link to="/register-as-member" className="btn">
-              Become a member
-            </Link>
-            <Link to="/contact" className="btn btn-ghost btn-ghost--light">
-              Book a 15-minute chat
-            </Link>
-          </div>
-        </div>
-      </section>
-    </>
+      <FinalCta />
+    </div>
   );
 }

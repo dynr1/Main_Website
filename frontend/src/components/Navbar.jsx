@@ -2,11 +2,11 @@ import { useState, useEffect } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 
 const links = [
-  { to: "/what-we-do", label: "What we do" },
-  { to: "/our-story", label: "Our story" },
+  { to: "/what-we-do", label: "The platform" },
   { to: "/for-restaurants", label: "For restaurants" },
   { to: "/membership", label: "Membership" },
-  { to: "/faq", label: "FAQ" },
+  { to: "/our-story", label: "Our story" },
+  { to: "/faq", label: "FAQs" },
   { to: "/contact", label: "Contact" },
 ];
 
@@ -56,7 +56,7 @@ export default function Navbar() {
         </nav>
 
         <Link className="btn btn-sm header-cta" to="/register-as-member">
-          Become a member
+          Start your 2 months free trial
         </Link>
       </div>
 
@@ -74,6 +74,9 @@ export default function Navbar() {
             {l.label}
           </Link>
         ))}
+        <Link to="/register-as-member" style={{ color: "var(--accent-dark)", fontWeight: 700 }}>
+          Start your 2 months free trial
+        </Link>
       </nav>
     </header>
   );

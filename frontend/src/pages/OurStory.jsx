@@ -1,68 +1,70 @@
-import {Link} from "react-router-dom";
-
+import { Link } from "react-router-dom";
+import { FinalCta } from "../components/PageBits";
 
 export default function OurStory() {
   return (
-    <>
-      <section>
-        <div className="container center-block">
-                    <h1>We got tired of losing guests. So we decided to fix it.</h1>
-        </div>
-      </section>
-
-      <section style={{ paddingTop: 0 }}>
-        <div className="container content-block">
-          <p>
-            Years on the floor of busy restaurants taught us something most
-            people don't say out loud: guests don't stop coming back because
-            the food or the service was bad. Most nights, everything goes
-            right. They enjoy themselves. They mean it when they say "we'll
-            be back."
-          </p>
-
-          <p>
-            But too often, they don't — or when they do, months later,
-            nothing about that visit feels any different from the first. So
-            we started asking a different question: what would it actually
-            take to make guests come back?
-          </p>
-
-          <blockquote className="pull-quote">
-            What would it actually take to make guests come back?
-          </blockquote>
-
-          <p>
-            The answer turned out to be simple, if not easy. We started
-            paying proper attention — writing down who came in, what they
-            liked, what mattered to them. It was hard to keep up manually.
-            But it worked. Guests who came back once started coming back
-            every week. They brought people with them. Quiet nights started
-            filling up.
-          </p>
-
-          <p>
-            That's why we built dynR — a way for any restaurant to keep that
-            same guest information, accessible to anyone on the team,
-            without relying on memory, habit, or one person's notebook.
+    <div className="hm">
+      <section className="hm-page-hero">
+        <div className="hm-wrap">
+          <p className="hm-eyebrow">Our story</p>
+          <h1>
+            Built from the floor up.
+            <br />
+            <span>For the welcome back.</span>
+          </h1>
+          <p className="hm-lead">
+            dynR began with a question familiar to anyone who has worked in hospitality: how do we make guests feel remembered when they return?
           </p>
         </div>
       </section>
 
-      <section className="section-alt">
-        <div className="container center-block">
-          <p style={{ fontSize: "22px", color: "var(--ink)" }}>
-            If any of this sounds familiar, let's talk.
+      <section className="hm-section hm-section-tight">
+        <div className="hm-wrap hm-narrow hm-prose">
+          <p>
+            Years on busy restaurant floors taught us how much the little details matter. A favourite table. A familiar face. A small note that makes
+            the next visit feel personal.
           </p>
-          <div className="hero-actions" style={{ justifyContent: "center" }}>
-            <Link to="/register-as-member" className="btn">
-              Become a member
-            </Link>
-            <Link to="/contact" className="btn btn-ghost">
-              Book a 15-minute chat
+          <p>
+            Keeping track of those details was harder. Information lived in someone’s memory or a notebook. When that person wasn’t on shift, the
+            connection could get lost.
+          </p>
+        </div>
+      </section>
+
+      <section className="hm-tint">
+        <div className="hm-wrap hm-two hm-two-center">
+          <div>
+            <h2>
+              Hospitality shouldn’t depend on who remembers.
+            </h2>
+          </div>
+          <div className="hm-prose">
+            <p>
+              That is why we built dynR: a way to keep useful guest information together, accessible to the team, so thoughtful hospitality is easier
+              to continue from one visit to the next.
+            </p>
+            <ul className="hm-beliefs">
+              <li>Know the guest.</li>
+              <li>Remember the details.</li>
+              <li>Make the welcome personal.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section className="hm-section hm-section-tight">
+        <div className="hm-wrap hm-narrow hm-prose">
+          <p className="hm-big-quote">Technology should support the conversation, not replace it.</p>
+          <p>Your people still make the welcome. dynR helps them remember where to begin.</p>
+          <div className="hm-cta-row">
+            <Link to="/contact" className="hm-btn hm-btn-ghost">
+              Request a 15-minute chat
             </Link>
           </div>
         </div>
       </section>
-    </>
+
+      <FinalCta />
+    </div>
   );
 }

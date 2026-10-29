@@ -102,7 +102,7 @@ export default function Home() {
             <h1>First-time guests.<br /><span>Future regulars.</span></h1>
             <p className="hm-lead">You make the visit special. dynR helps you remember your guests, stay in touch and give them a reason to come back.</p>
             <div className="hm-cta-row">
-              <Link to="/register-as-member" className="hm-btn hm-btn-primary">Start my 2 months free <i>↗</i></Link>
+              <Link to="/register-as-member" className="hm-btn hm-btn-primary">Start your 2 months free trial <i>↗</i></Link>
               <Link to="/contact" className="hm-btn hm-btn-ghost">Request a 15-minute chat</Link>
             </div>
             <p className="hm-fine">Card required. Nothing charged for two months, then {PRICE}/month automatically. Cancel anytime.</p>
@@ -193,7 +193,7 @@ export default function Home() {
               <p className="hm-price"><b>{PRICE}</b> / month</p>
               <p className="hm-price-sub">Your tools for lasting guest relationships.</p>
               <ul>{INCLUDED.map(x => <li key={x}><i>✓</i>{x}</li>)}</ul>
-              <Link to="/register-as-member" className="hm-btn hm-btn-primary hm-btn-block">Start my 2 months free <i>↗</i></Link>
+              <Link to="/register-as-member" className="hm-btn hm-btn-primary hm-btn-block">Start your 2 months free trial <i>↗</i></Link>
               <p className="hm-fine">Card required. Nothing charged for two months, then {PRICE}/month automatically. Cancel anytime.</p>
             </div>
           </div>
@@ -245,7 +245,7 @@ export default function Home() {
             <p className="hm-lead">Start with your next guest. Build the relationship from there.</p>
           </div>
           <div>
-            <Link to="/register-as-member" className="hm-btn hm-btn-primary">Start my 2 months free <i>↗</i></Link>
+            <Link to="/register-as-member" className="hm-btn hm-btn-primary">Start your 2 months free trial <i>↗</i></Link>
             <p className="hm-fine">Card required. Nothing charged for two months, then {PRICE}/month automatically. Cancel anytime.</p>
           </div>
         </div>

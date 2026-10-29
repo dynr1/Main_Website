@@ -12,36 +12,41 @@ export default function Footer() {
           <div className="foot-brand">
             <img src="/dynR_logo.png" alt="dynR" />
             <p>
-              A guest relationship platform for independent restaurants.
+              Guest relationships.
+              <br />
+              Better hospitality.
             </p>
             <a href="mailto:hello@dynr.co.uk">hello@dynr.co.uk</a>
           </div>
 
-          <nav aria-label="Product">
-            <h4>Product</h4>
-            <Link to="/what-we-do">What we do</Link>
-            <Link to="/membership">Membership</Link>
+          <nav aria-label="Explore">
+            <h4>Explore</h4>
+            <Link to="/">Home</Link>
+            <Link to="/what-we-do">The platform</Link>
             <Link to="/for-restaurants">For restaurants</Link>
-            <Link to="/faq">FAQ</Link>
           </nav>
 
-          <nav aria-label="Company">
-            <h4>Company</h4>
+          <nav aria-label="Get to know dynR">
+            <h4>Get to know dynR</h4>
             <Link to="/our-story">Our story</Link>
-            <Link to="/contact">Contact</Link>
-            <Link to="/login">Restaurant login</Link>
+            <Link to="/membership">Membership</Link>
+            <Link to="/faq">FAQs</Link>
           </nav>
 
-          <nav aria-label="Legal">
-            <h4>Legal</h4>
-            <Link to="/privacy">Privacy policy</Link>
-            <Link to="/terms">Terms of service</Link>
+          <nav aria-label="Let's talk">
+            <h4>Let&rsquo;s talk</h4>
+            <Link to="/contact">Request a 15-minute chat</Link>
+            <a href="mailto:hello@dynr.co.uk">hello@dynr.co.uk</a>
+            <Link to="/login">Restaurant login</Link>
           </nav>
         </div>
 
         <div className="foot-base">
           <span>© {new Date().getFullYear()} dynR. All rights reserved.</span>
-          {COMPANY_LINE && <span>{COMPANY_LINE}</span>}
+          <span>
+            <Link to="/privacy">Privacy policy</Link> · <Link to="/terms">Terms of service</Link>
+            {COMPANY_LINE ? ` · ${COMPANY_LINE}` : ""}
+          </span>
         </div>
       </div>
     </footer>
