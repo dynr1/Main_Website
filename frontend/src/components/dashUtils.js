@@ -86,18 +86,27 @@ export function relationship(g) {
   return { key: "regular", label: "Regular" };
 }
 
-// Finds the guest a booking belongs to (same email, else same phone).
+// Same mobile written differently (07123 456789 / +44 7123 456789) compares equal.
+export function normPhone(p) {
+  let d = String(p || "").replace(/[^\d+]/g, "");
+  if (d.startsWith("+44")) d = "0" + d.slice(3);
+  else if (d.startsWith("0044")) d = "0" + d.slice(4);
+  return d.replace(/\D/g, "");
+}
+
+// Finds the guest a booking belongs to: by mobile number first, then email.
 export function makeGuestMatcher(guests) {
   const byEmail = new Map();
   const byPhone = new Map();
   guests.forEach((g) => {
     if (g.email) byEmail.set(g.email.trim().toLowerCase(), g);
-    if (g.phone) byPhone.set(g.phone.trim(), g);
+    const n = normPhone(g.phone);
+    if (n) byPhone.set(n, g);
   });
-  return (r) =>
-    (r.email && byEmail.get(r.email.trim().toLowerCase())) ||
-    (r.phone && byPhone.get(r.phone.trim())) ||
-    null;
+  return (r) => {
+    const n = normPhone(r.phone);
+    return (n && byPhone.get(n)) || (r.email && byEmail.get(r.email.trim().toLowerCase())) || null;
+  };
 }
 
 // Upcoming birthdays within `withinDays` days, soonest first.

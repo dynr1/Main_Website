@@ -31,11 +31,13 @@ const CARDS = [
 const STATUS_LABEL = { sending: "Sending…", sent: "Sent", "partly sent": "Partly sent", failed: "Failed" };
 const QUEUE_LABEL = { pending: "Scheduled", sent: "Sent", skipped: "Skipped", failed: "Failed" };
 
-function CampaignModal({ api, restaurantName, audiences, start, onClose, onSent }) {
+const withLink = (text, url) => (url && !text.includes(url) ? `${text.replace(/\s+$/, "")}\n\nBook a table: ${url}` : text);
+
+function CampaignModal({ api, restaurantName, audiences, start, bookingUrl, onClose, onSent }) {
   const first = start || "second_visit";
   const [audience, setAudience] = useState(first);
   const [subject, setSubject] = useState((STARTERS[first].subject || "").replace("{restaurant}", restaurantName));
-  const [message, setMessage] = useState(STARTERS[first].message);
+  const [message, setMessage] = useState(withLink(STARTERS[first].message, bookingUrl));
   const [confirm, setConfirm] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
@@ -45,7 +47,7 @@ function CampaignModal({ api, restaurantName, audiences, start, onClose, onSent 
   function pick(key) {
     setAudience(key);
     setSubject((STARTERS[key].subject || "").replace("{restaurant}", restaurantName));
-    setMessage(STARTERS[key].message);
+    setMessage(withLink(STARTERS[key].message, bookingUrl));
     setConfirm(false);
   }
 
@@ -93,6 +95,9 @@ function CampaignModal({ api, restaurantName, audiences, start, onClose, onSent 
             Message
             <textarea className="dx-textarea dx-textarea-flush" rows={7} value={message} onChange={(e) => setMessage(e.target.value)} maxLength={5000} />
             <span className="dx-hint">
+              <button type="button" className="dx-link" onClick={() => setMessage((m) => withLink(m, bookingUrl))}>
+                + Add my booking link
+              </button>{" "}
               Use {"{first_name}"} to add each guest's first name. Your restaurant name and an unsubscribe link are added at the bottom automatically.
             </span>
           </label>
@@ -336,6 +341,7 @@ export default function DashMarketing() {
           api={api}
           restaurantName={name}
           audiences={data.audiences}
+          bookingUrl={data.bookingUrl}
           start={modal === "new" ? "second_visit" : modal}
           onClose={() => setModal(null)}
           onSent={async () => {

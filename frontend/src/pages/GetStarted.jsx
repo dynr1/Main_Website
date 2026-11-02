@@ -191,7 +191,7 @@ export default function GetStarted() {
             <div>
               <span style={{ opacity: 0.75 }}>Only </span>
               <span style={{ fontSize: "2rem", fontWeight: 700, color: "var(--accent)" }}>
-                £49
+                £79
               </span>
               <span style={{ opacity: 0.75 }}> /month</span>
             </div>

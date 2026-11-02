@@ -809,10 +809,69 @@ app.get('/api/member/me', requireAuth, async (req, res) => {
   return res.json({ member })
 })
 
+
+// ---------- Opening hours (set in Settings, enforced on the booking page) ----------
+const DAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/
+
+function parseHours(raw) {
+  if (!raw) return null
+  try {
+    const h = JSON.parse(raw)
+    return h && typeof h === 'object' ? h : null
+  } catch {
+    return null
+  }
+}
+
+// Returns a clean { mon: {open, from, to}, ... } or an error string.
+function cleanHours(input) {
+  if (!input || typeof input !== 'object') return 'Opening hours are not valid.'
+  const out = {}
+  for (const k of DAY_KEYS) {
+    const d = input[k] || {}
+    if (!d.open) {
+      out[k] = { open: false, from: '', to: '' }
+      continue
+    }
+    if (!HHMM.test(String(d.from)) || !HHMM.test(String(d.to))) {
+      return `Please set an opening time and a last booking time for ${DAY_NAMES[DAY_KEYS.indexOf(k)]}.`
+    }
+    if (String(d.from) >= String(d.to)) {
+      return `On ${DAY_NAMES[DAY_KEYS.indexOf(k)]}, the last booking time must be after the opening time.`
+    }
+    out[k] = { open: true, from: String(d.from), to: String(d.to) }
+  }
+  return out
+}
+
+// null when the booking is fine, otherwise a message for the guest.
+function checkBookingAgainstHours(hours, dateStr, timeStr) {
+  if (!hours) return null
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateStr))) return 'Please choose a valid date.'
+  const dow = new Date(`${dateStr}T12:00:00Z`).getUTCDay()
+  const d = hours[DAY_KEYS[dow]]
+  if (!d || !d.open) return `Sorry, we're closed on ${DAY_NAMES[dow]}s. Please choose another day.`
+  const t = String(timeStr).slice(0, 5)
+  if (t < d.from || t > d.to) {
+    return `On ${DAY_NAMES[dow]}s we take bookings from ${d.from} to ${d.to}. Please choose a time in that window.`
+  }
+  return null
+}
+
+// Same phone number written differently (07123 456789, +44 7123 456789) compares equal.
+function normPhone(p) {
+  let d = String(p || '').replace(/[^\d+]/g, '')
+  if (d.startsWith('+44')) d = '0' + d.slice(3)
+  else if (d.startsWith('0044')) d = '0' + d.slice(4)
+  return d.replace(/\D/g, '')
+}
+
 // ---------- Public: Get restaurant name by slug (for guest sign-up page) ----------
 app.get('/api/public/restaurant/:slug', async (req, res) => {
   const restaurant = await db
-    .prepare('SELECT id, restaurant_name, google_review_url FROM members WHERE slug = ?')
+    .prepare('SELECT id, restaurant_name, google_review_url, opening_hours FROM members WHERE slug = ?')
     .get(req.params.slug)
 
   if (!restaurant) {
@@ -822,6 +881,7 @@ app.get('/api/public/restaurant/:slug', async (req, res) => {
   return res.json({
     id: restaurant.id,
     name: restaurant.restaurant_name,
+    openingHours: parseHours(restaurant.opening_hours),
   })
 })
 
@@ -917,12 +977,16 @@ app.post('/api/public/reservations', async (req, res) => {
     notes,
   } = req.body || {}
 
-  if (!slug || !name || !phone || !partySize || !reservationDate || !reservationTime) {
-    return res.status(400).json({ error: 'Please fill in all required fields.' })
+  if (!slug || !name || !phone || !email || !partySize || !reservationDate || !reservationTime) {
+    return res.status(400).json({ error: 'Please fill in all required fields, including your mobile number and email.' })
   }
 
-  if (email && !isValidEmail(email)) {
+  if (!isValidEmail(email)) {
     return res.status(400).json({ error: 'Please enter a valid email address.' })
+  }
+
+  if (normPhone(phone).length < 10) {
+    return res.status(400).json({ error: 'Please enter a valid mobile number.' })
   }
 
   const partySizeNum = Number(partySize)
@@ -935,13 +999,16 @@ app.post('/api/public/reservations', async (req, res) => {
     return res.status(404).json({ error: 'Restaurant not found.' })
   }
 
+  const hoursProblem = checkBookingAgainstHours(parseHours(restaurant.opening_hours), reservationDate, reservationTime)
+  if (hoursProblem) return res.status(400).json({ error: hoursProblem })
+
   try {
     const result = await tenant(restaurant)
       .prepare(
         `INSERT INTO reservations (name, email, phone, party_size, reservation_date, reservation_time, notes)
          VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`
       )
-      .run(name, email || null, phone, partySizeNum, reservationDate, reservationTime, notes || null)
+      .run(String(name).trim(), String(email).trim(), String(phone).trim(), partySizeNum, reservationDate, reservationTime, notes || null)
 
     // Notify the restaurant of the new reservation, via their own SMTP.
     // If they haven't set it up yet, the reservation is still saved and
@@ -1142,14 +1209,19 @@ app.post('/api/reservations/:id/complete', requireAuth, async (req, res) => {
   if (!reservation) return res.status(404).json({ error: 'Reservation not found.' })
   if (reservation.status === 'completed') return res.json({ ok: true, recorded: false })
 
+  // Matched by mobile number first (written any way), then by email.
   let guest = null
-  if (reservation.email) {
+  if (reservation.phone) {
+    const want = normPhone(reservation.phone)
+    if (want) {
+      const withPhone = await req.tenant.prepare("SELECT id, phone FROM guests WHERE phone IS NOT NULL AND phone <> ''").all()
+      guest = withPhone.find((g) => normPhone(g.phone) === want) || null
+    }
+  }
+  if (!guest && reservation.email) {
     guest = await req.tenant
       .prepare('SELECT id FROM guests WHERE LOWER(email) = LOWER(?) LIMIT 1')
       .get(reservation.email)
-  }
-  if (!guest && reservation.phone) {
-    guest = await req.tenant.prepare('SELECT id FROM guests WHERE phone = ? LIMIT 1').get(reservation.phone)
   }
 
   await req.tenant.prepare("UPDATE reservations SET status = 'completed' WHERE id = ?").run(reservation.id)
@@ -1276,7 +1348,7 @@ async function audienceMembers(folder) {
 
 app.get('/api/marketing/overview', requireAuth, async (req, res) => {
   const members = await audienceMembers(req.tenant)
-  const restaurant = await db.prepare('SELECT smtp_host, smtp_user, smtp_pass, google_review_url FROM members WHERE id = ?').get(req.memberId)
+  const restaurant = await db.prepare('SELECT slug, smtp_host, smtp_user, smtp_pass, google_review_url FROM members WHERE id = ?').get(req.memberId)
 
   const campaigns = await req.tenant
     .prepare('SELECT id, name, audience, subject, recipients_count, sent_count, status, created_at FROM campaigns ORDER BY id DESC LIMIT 20')
@@ -1296,6 +1368,7 @@ app.get('/api/marketing/overview', requireAuth, async (req, res) => {
     queue,
     emailReady: Boolean(restaurant?.smtp_host && restaurant?.smtp_user && restaurant?.smtp_pass),
     reviewLinkSet: Boolean(restaurant?.google_review_url),
+    bookingUrl: `${APP_URL()}/table/${restaurant.slug}`,
   })
 })
 
@@ -1448,7 +1521,7 @@ app.post('/api/settings/test-email', requireAuth, testEmailLimiter, async (req, 
 app.get('/api/settings', requireAuth, async (req, res) => {
   const member = await db
     .prepare(
-      'SELECT smtp_host, smtp_port, smtp_user, smtp_pass, google_review_url FROM members WHERE id = ?'
+      'SELECT smtp_host, smtp_port, smtp_user, smtp_pass, google_review_url, opening_hours FROM members WHERE id = ?'
     )
     .get(req.memberId)
 
@@ -1456,14 +1529,24 @@ app.get('/api/settings', requireAuth, async (req, res) => {
     return res.status(404).json({ error: 'Restaurant not found.' })
   }
 
-  return res.json({ settings: member })
+  return res.json({ settings: { ...member, opening_hours: parseHours(member.opening_hours) } })
 })
 
 // ---------- Settings: Update SMTP + Google review link ----------
 app.put('/api/settings', requireAuth, async (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, googleReviewUrl } = req.body || {}
+  const { smtpHost, smtpPort, smtpUser, smtpPass, googleReviewUrl, openingHours } = req.body || {}
+
+  let hoursJson
+  if (openingHours !== undefined) {
+    const cleaned = cleanHours(openingHours)
+    if (typeof cleaned === 'string') return res.status(400).json({ error: cleaned })
+    hoursJson = JSON.stringify(cleaned)
+  }
 
   try {
+    if (hoursJson !== undefined) {
+      await db.prepare('UPDATE members SET opening_hours = ? WHERE id = ?').run(hoursJson, req.memberId)
+    }
     await db.prepare(
       `UPDATE members
        SET smtp_host = ?, smtp_port = ?, smtp_user = ?, smtp_pass = ?, google_review_url = ?

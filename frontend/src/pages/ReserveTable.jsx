@@ -46,6 +46,27 @@ export default function ReserveTable() {
     setForm((f) => ({ ...f, [name]: value }));
   }
 
+  const hours = restaurant?.openingHours || null;
+  const dayInfo = (dateStr) => {
+    if (!hours || !dateStr) return null;
+    const [y, m, d] = dateStr.split("-").map(Number);
+    const key = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][new Date(y, m - 1, d).getDay()];
+    return { key, ...hours[key] };
+  };
+  const chosenDay = dayInfo(form.reservationDate);
+  const closedToday = chosenDay && !chosenDay.open;
+
+  // Booking times in 15-minute steps, from opening to the last booking.
+  const timeOptions = (() => {
+    if (!chosenDay || !chosenDay.open) return [];
+    const toMin = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+    const out = [];
+    for (let m = toMin(chosenDay.from); m <= toMin(chosenDay.to); m += 15) {
+      out.push(`${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`);
+    }
+    return out;
+  })();
+
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
@@ -99,6 +120,9 @@ export default function ReserveTable() {
     );
   }
 
+  // Opening hours summary shown under the heading.
+  const DAYS = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"]];
+
   // Restrict the date picker to today onward.
   const today = new Date().toISOString().slice(0, 10);
 
@@ -111,6 +135,17 @@ export default function ReserveTable() {
           Fill in your details below and {restaurant.name} will have your
           table request ready to go.
         </p>
+
+        {hours && (
+          <ul className="join-hours" aria-label="Opening hours">
+            {DAYS.map(([k, l]) => (
+              <li key={k}>
+                <b>{l}</b>
+                <span>{hours[k]?.open ? `${hours[k].from}–${hours[k].to}` : "Closed"}</span>
+              </li>
+            ))}
+          </ul>
+        )}
 
         {error && <div className="form-error">{error}</div>}
 
@@ -144,16 +179,37 @@ export default function ReserveTable() {
 
             <div className="form-group">
               <label htmlFor="reservationTime">Time</label>
-              <input
-                id="reservationTime"
-                name="reservationTime"
-                type="time"
-                value={form.reservationTime}
-                onChange={handleChange}
-                required
-              />
+              {hours ? (
+                <select
+                  id="reservationTime"
+                  name="reservationTime"
+                  value={form.reservationTime}
+                  onChange={handleChange}
+                  disabled={!form.reservationDate || closedToday}
+                  required
+                >
+                  <option value="">{!form.reservationDate ? "Pick a date first" : closedToday ? "Closed" : "Choose a time"}</option>
+                  {timeOptions.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  id="reservationTime"
+                  name="reservationTime"
+                  type="time"
+                  value={form.reservationTime}
+                  onChange={handleChange}
+                  required
+                />
+              )}
             </div>
           </div>
+          {closedToday && (
+            <div className="form-error">
+              Sorry, {restaurant.name} is closed on that day. Please choose another date.
+            </div>
+          )}
 
           <div className="form-group">
             <label htmlFor="partySize">Party size</label>
@@ -171,7 +227,7 @@ export default function ReserveTable() {
           </div>
 
           <div className="form-group">
-            <label htmlFor="phone">Phone number</label>
+            <label htmlFor="phone">Mobile number</label>
             <input
               id="phone"
               name="phone"
@@ -184,7 +240,7 @@ export default function ReserveTable() {
           </div>
 
           <div className="form-group">
-            <label htmlFor="email">Email (optional)</label>
+            <label htmlFor="email">Email</label>
             <input
               id="email"
               name="email"
@@ -192,6 +248,7 @@ export default function ReserveTable() {
               placeholder="sarah@email.com"
               value={form.email}
               onChange={handleChange}
+              required
             />
           </div>
 

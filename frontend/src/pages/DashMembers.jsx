@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import { MessageModal, NoteModal } from "../components/DashModals";
-import { ago, daysSince, fmtShort, initials, parseDbTime, relationship } from "../components/dashUtils";
+import { ago, daysSince, fmtShort, initials, makeGuestMatcher, parseDbTime, parseYmd, relationship, statusLabel } from "../components/dashUtils";
 
 const FILTERS = [
   ["all", "All members"],
@@ -12,7 +12,8 @@ const FILTERS = [
 ];
 
 export default function DashMembers() {
-  const { api, guests, loading, reload, openQR } = useOutletContext();
+  const { api, guests, reservations, loading, reload, openQR } = useOutletContext();
+  const match = useMemo(() => makeGuestMatcher(guests), [guests]);
   const [params, setParams] = useSearchParams();
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState("all");
@@ -240,6 +241,24 @@ export default function DashMembers() {
                 <dd>{activeGuest.visit_count ?? 0} · last seen {activeGuest.last_visit ? ago(daysSince(activeGuest.last_visit)) : "never"}</dd>
               </div>
             </dl>
+            <h4>Bookings</h4>
+            {(() => {
+              const mine = (reservations || [])
+                .filter((r) => match(r)?.id === activeGuest.id)
+                .sort((a, b) => `${b.reservation_date} ${b.reservation_time}`.localeCompare(`${a.reservation_date} ${a.reservation_time}`));
+              if (!mine.length) return <div className="dx-note-box">No bookings yet. Bookings made with this guest's mobile number appear here.</div>;
+              return (
+                <ul className="dx-booklist">
+                  {mine.slice(0, 6).map((r) => (
+                    <li key={r.id}>
+                      <b>{fmtShort(parseYmd(r.reservation_date))} · {r.reservation_time.slice(0, 5)}</b>
+                      <span>Table for {r.party_size}{r.table_label ? ` · ${r.table_label}` : ""}</span>
+                      <span className={`dx-pill s-${r.status}`}>{statusLabel(r.status)}</span>
+                    </li>
+                  ))}
+                </ul>
+              );
+            })()}
             <h4>Latest note</h4>
             <div className="dx-note-box">{activeGuest.latest_note || "No notes yet."}</div>
             <div className="dx-stack-full">

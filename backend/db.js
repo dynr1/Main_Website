@@ -101,6 +101,7 @@ async function setupCentral() {
   await addColumnIfMissing('members', 'smtp_user', 'TEXT')
   await addColumnIfMissing('members', 'smtp_pass', 'TEXT')
   await addColumnIfMissing('members', 'google_review_url', 'TEXT')
+  await addColumnIfMissing('members', 'opening_hours', 'TEXT')
   await addColumnIfMissing('members', 'slug', 'TEXT')
   await addColumnIfMissing('members', 'payment_status', "TEXT NOT NULL DEFAULT 'unpaid'")
   await addColumnIfMissing('members', 'welcome_email_sent', 'INTEGER NOT NULL DEFAULT 0')

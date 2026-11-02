@@ -55,6 +55,19 @@ const PROVIDERS = {
   },
 };
 
+const WEEK = [
+  ["mon", "Monday"],
+  ["tue", "Tuesday"],
+  ["wed", "Wednesday"],
+  ["thu", "Thursday"],
+  ["fri", "Friday"],
+  ["sat", "Saturday"],
+  ["sun", "Sunday"],
+];
+const DEFAULT_HOURS = Object.fromEntries(
+  WEEK.map(([k]) => [k, { open: true, from: "12:00", to: "21:30" }])
+);
+
 function detectProvider(host) {
   const h = (host || "").toLowerCase();
   if (!h) return "gmail";
@@ -71,7 +84,10 @@ export default function Settings() {
     smtpUser: "",
     smtpPass: "",
     googleReviewUrl: "",
+    openingHours: DEFAULT_HOURS,
   });
+  const [bookingUrl, setBookingUrl] = useState("");
+  const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -100,6 +116,7 @@ export default function Settings() {
             smtpUser: data.settings.smtp_user || "",
             smtpPass: data.settings.smtp_pass || "",
             googleReviewUrl: data.settings.google_review_url || "",
+            openingHours: { ...DEFAULT_HOURS, ...(data.settings.opening_hours || {}) },
           });
         }
       } catch (err) {
@@ -109,6 +126,10 @@ export default function Settings() {
       }
     }
     loadSettings();
+    fetch(`${API_URL}/api/member/me`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d?.member?.slug && setBookingUrl(`${window.location.origin}/table/${d.member.slug}`))
+      .catch(() => {});
     fetch(`${API_URL}/api/billing`, { headers: { Authorization: `Bearer ${token}` } })
       .then((r) => (r.ok ? r.json() : null))
       .then((b) => b && setBilling(b))
@@ -138,6 +159,18 @@ export default function Settings() {
     const { name, value } = e.target;
     setTestResult(null);
     setForm((f) => ({ ...f, [name]: value }));
+  }
+
+  function setDay(key, patch) {
+    setSuccess(false);
+    setForm((f) => ({ ...f, openingHours: { ...f.openingHours, [key]: { ...f.openingHours[key], ...patch } } }));
+  }
+
+  function copyBooking() {
+    navigator.clipboard?.writeText(bookingUrl).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
   }
 
   function chooseProvider(key) {
@@ -379,6 +412,45 @@ export default function Settings() {
                 }
               >
                 {testResult.message}
+              </div>
+            )}
+
+            <h4 style={{ margin: "28px 0 12px" }}>Opening hours &amp; bookings</h4>
+            <p style={{ fontSize: 16, color: "var(--muted)", marginBottom: 16 }}>
+              Guests can only book on the days and times you set here. Set the first time you start seating guests and the last time you can take a booking.
+            </p>
+            <div className="dx-hours">
+              {WEEK.map(([k, label]) => {
+                const d = form.openingHours[k];
+                return (
+                  <div key={k} className={"dx-hours-row" + (d.open ? "" : " is-closed")}>
+                    <label className="dx-hours-day">
+                      <input type="checkbox" checked={d.open} onChange={(e) => setDay(k, { open: e.target.checked })} />
+                      <span>{label}</span>
+                    </label>
+                    {d.open ? (
+                      <div className="dx-hours-times">
+                        <label>
+                          <small>Opens</small>
+                          <input type="time" value={d.from} onChange={(e) => setDay(k, { from: e.target.value })} required />
+                        </label>
+                        <label>
+                          <small>Last booking</small>
+                          <input type="time" value={d.to} onChange={(e) => setDay(k, { to: e.target.value })} required />
+                        </label>
+                      </div>
+                    ) : (
+                      <span className="dx-hours-closed">Closed</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {bookingUrl && (
+              <div className="dx-booklink">
+                <small>Your booking link</small>
+                <code>{bookingUrl}</code>
+                <button type="button" className="btn btn-ghost" onClick={copyBooking}>{copied ? "Copied ✓" : "Copy link"}</button>
               </div>
             )}
 
